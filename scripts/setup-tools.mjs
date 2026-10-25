@@ -3,8 +3,7 @@
 //   bin/realesrgan/  realesrgan-ncnn-vulkan + models   (BSD-3, xinntao/Real-ESRGAN)
 //   bin/ffmpeg/      ffmpeg + ffprobe on Windows        (GPL build, BtbN/FFmpeg-Builds)
 // On Linux/macOS ffmpeg is taken from the system (apt / brew) if not present in bin/.
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +23,20 @@ const REALESRGAN = {
 const REALESRGAN_BASE = 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/';
 const FFMPEG_WIN = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
 
+// Face restoration models (bin/faces). File names must match electron/faces/models.ts.
+const FACE_MODELS = [
+  {
+    file: 'face_detection_yunet_2023mar.onnx', // OpenCV Zoo, MIT
+    url: 'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
+    minBytes: 100_000,
+  },
+  {
+    file: 'gfpgan_1.4.onnx', // GFPGAN v1.4 (TencentARC, Apache-2.0) exported to ONNX by FaceFusion
+    url: 'https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx',
+    minBytes: 100_000_000,
+  },
+];
+
 const exe = (name) => (platform === 'win32' ? `${name}.exe` : name);
 
 async function download(url, dest) {
@@ -31,20 +44,24 @@ async function download(url, dest) {
   const res = await fetch(url, { redirect: 'follow' });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const total = Number(res.headers.get('content-length')) || 0;
-  const chunks = [];
+  const fd = openSync(dest, 'w');
   let got = 0;
   let lastPct = -1;
-  for await (const chunk of res.body) {
-    chunks.push(chunk);
-    got += chunk.length;
-    const pct = total ? Math.floor((got / total) * 100) : -1;
-    if (pct >= 0 && pct % 10 === 0 && pct !== lastPct) {
-      process.stdout.write(`  ${pct}%\r`);
-      lastPct = pct;
+  try {
+    for await (const chunk of res.body) {
+      writeSync(fd, chunk);
+      got += chunk.length;
+      const pct = total ? Math.floor((got / total) * 100) : -1;
+      if (pct >= 0 && pct % 10 === 0 && pct !== lastPct) {
+        process.stdout.write(`  ${pct}%\r`);
+        lastPct = pct;
+      }
     }
+  } finally {
+    closeSync(fd);
   }
-  await writeFile(dest, Buffer.concat(chunks));
   console.log(`  ${(got / 1024 / 1024).toFixed(1)} MB`);
+  return got;
 }
 
 /** Find the first file with this name anywhere under dir. */
@@ -143,10 +160,36 @@ async function setupFfmpeg() {
   console.log('✓ ffmpeg →', target);
 }
 
+async function setupFaces() {
+  const target = path.join(bin, 'faces');
+  mkdirSync(target, { recursive: true });
+  for (const m of FACE_MODELS) {
+    const dest = path.join(target, m.file);
+    if (!force && existsSync(dest) && statSync(dest).size >= m.minBytes) {
+      console.log(`✓ ${m.file} уже скачан`);
+      continue;
+    }
+    const part = `${dest}.part`;
+    try {
+      const size = await download(m.url, part);
+      if (size < m.minBytes) throw new Error(`файл слишком маленький (${size} байт), похоже на ошибку загрузки`);
+      renameSync(part, dest);
+      console.log(`✓ ${m.file}`);
+    } catch (err) {
+      rmSync(part, { force: true });
+      // Faces are optional: report and keep going so the rest of the app still works.
+      console.log(`! Не удалось скачать ${m.file}: ${err.message}`);
+      console.log(`  Скачайте вручную: ${m.url}`);
+      console.log(`  и положите в ${target}`);
+    }
+  }
+}
+
 try {
   mkdirSync(bin, { recursive: true });
   await setupRealesrgan();
   await setupFfmpeg();
+  await setupFaces();
   console.log('\nГотово. Запуск: npm run dev');
 } catch (err) {
   console.error('\n✗ Ошибка установки:', err.message);

@@ -10,6 +10,7 @@ const STAGE_LABEL: Record<string, string> = {
   queued: 'В очереди',
   prepare: 'Очистка кадров',
   upscale: 'Апскейл',
+  faces: 'Лица',
   encode: 'Кодирование',
   done: 'Готово',
   error: 'Ошибка',
@@ -56,7 +57,8 @@ export class App {
 
   protected engineLabel(o: ProcessOptions): string {
     if (o.engine === 'ffmpeg') return 'ffmpeg';
-    return o.model === 'realesrgan-x4plus' ? 'x4plus' : `animevideov3 ×${o.scale}`;
+    const model = o.model === 'realesrgan-x4plus' ? 'x4plus' : `animevideov3 ×${o.scale}`;
+    return o.faceRestore ? `${model} + лица` : model;
   }
 
   protected updateSelected(patch: Partial<ProcessOptions>) {

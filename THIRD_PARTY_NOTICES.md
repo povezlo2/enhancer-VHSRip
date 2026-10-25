@@ -12,6 +12,10 @@ If you distribute a packaged build that includes `bin/`, ship the corresponding 
 | Real-ESRGAN models (`realesr-animevideov3`, `realesrgan-x4plus`) | https://github.com/xinntao/Real-ESRGAN | BSD 3-Clause |
 | ncnn (inside the binary) | https://github.com/Tencent/ncnn | BSD 3-Clause |
 | FFmpeg (Windows GPL build) | https://github.com/BtbN/FFmpeg-Builds | GPL v3 (includes x264) |
+| GFPGAN v1.4 (`gfpgan_1.4.onnx`) | https://github.com/TencentARC/GFPGAN, ONNX export by https://huggingface.co/facefusion/models-3.0.0 | Apache 2.0 |
+| YuNet face detector (`face_detection_yunet_2023mar.onnx`) | https://github.com/opencv/opencv_zoo | MIT |
+| ONNX Runtime (npm `onnxruntime-node`, incl. DirectML on Windows) | https://github.com/microsoft/onnxruntime | MIT |
+| sharp / libvips (npm) | https://github.com/lovell/sharp | Apache 2.0 / LGPL-3.0 (libvips) |
 
 ## FFmpeg
 

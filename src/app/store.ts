@@ -17,6 +17,7 @@ export interface Clip {
   framesDone?: number;
   framesTotal?: number;
   etaSec?: number;
+  faces?: number;
   output?: string;
   error?: string;
 }
@@ -211,6 +212,7 @@ export class Store {
       framesDone: p.framesDone,
       framesTotal: p.framesTotal,
       etaSec: p.etaSec,
+      faces: p.faces,
       output: p.output ?? clip.output,
       error: p.stage === 'error' ? p.message : undefined,
     });
@@ -230,7 +232,7 @@ export class Store {
 }
 
 export function isActive(stage?: JobStage): boolean {
-  return stage === 'queued' || stage === 'prepare' || stage === 'upscale' || stage === 'encode';
+  return stage === 'queued' || stage === 'prepare' || stage === 'upscale' || stage === 'faces' || stage === 'encode';
 }
 
 export function isFinished(stage?: JobStage): boolean {

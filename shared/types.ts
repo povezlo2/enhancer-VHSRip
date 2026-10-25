@@ -79,6 +79,10 @@ export interface ProcessOptions {
   contrast: number; // 0.7 .. 1.5, 1 = unchanged
   saturation: number; // 0.5 .. 1.8, 1 = unchanged
   gamma: number; // 0.7 .. 1.4, 1 = unchanged
+  /** Restore faces with GFPGAN after upscaling (neural engine only). */
+  faceRestore: boolean;
+  /** 0.1..1: how much of the restored face is blended in (lower = more natural). */
+  faceStrength: number;
   /** 0 = off .. 3 = strong, applied after upscaling. */
   sharpen: 0 | 1 | 2 | 3;
   /** H.264 CRF, lower = better quality / bigger file. */
@@ -101,11 +105,13 @@ export const DEFAULT_OPTIONS: ProcessOptions = {
   contrast: 1,
   saturation: 1,
   gamma: 1,
+  faceRestore: false,
+  faceStrength: 0.6,
   sharpen: 1,
   crf: 16,
 };
 
-export type JobStage = 'queued' | 'prepare' | 'upscale' | 'encode' | 'done' | 'error' | 'cancelled';
+export type JobStage = 'queued' | 'prepare' | 'upscale' | 'faces' | 'encode' | 'done' | 'error' | 'cancelled';
 
 export interface JobProgress {
   jobId: string;
@@ -115,6 +121,8 @@ export interface JobProgress {
   framesDone?: number;
   framesTotal?: number;
   etaSec?: number;
+  /** Faces restored so far (faces stage). */
+  faces?: number;
   message?: string;
   output?: string;
 }
@@ -138,6 +146,8 @@ export interface ToolsStatus {
   ffprobe: string | null;
   realesrgan: string | null;
   models: string[];
+  /** Folder with the face models, or null if they are missing. */
+  faces: string | null;
   binDir: string;
 }
 
