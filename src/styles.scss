@@ -1,0 +1,149 @@
+/* Dark "editing suite" theme. Tokens are shared by all components. */
+:root {
+  --bg: #0f1115;
+  --bg-raised: #161920;
+  --bg-sunken: #0b0d10;
+  --line: #262a33;
+  --line-strong: #353b47;
+  --text: #e7e9ee;
+  --text-dim: #9aa1ae;
+  --text-faint: #6b7280;
+  --accent: #e8a33d;        /* warm tape-label amber */
+  --accent-ink: #1a1206;
+  --accent-soft: rgba(232, 163, 61, 0.14);
+  --ok: #4fbf7f;
+  --warn: #e0b341;
+  --err: #e5635b;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  --sans: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+
+  &:hover:not(:disabled) {
+    border-color: var(--text-faint);
+    background: #1d212a;
+  }
+
+  &:disabled {
+    opacity: 0.45;
+  }
+
+  &.primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+
+    &:hover:not(:disabled) {
+      background: #f0b257;
+    }
+  }
+
+  &.ghost {
+    border-color: transparent;
+    background: transparent;
+    color: var(--text-dim);
+
+    &:hover:not(:disabled) {
+      color: var(--text);
+      background: var(--bg-raised);
+    }
+  }
+
+  &.small {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 12.5px;
+  }
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+
+  &:hover {
+    color: #f0b257;
+  }
+}
+
+.progress {
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+
+  > i {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 6px;
+  background: var(--line-strong) padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

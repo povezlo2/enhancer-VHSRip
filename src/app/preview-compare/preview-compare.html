@@ -1,0 +1,88 @@
+<div class="bar">
+  <label class="field">
+    <span>Начало, с</span>
+    <input type="number" min="0" [max]="maxStart()" step="0.5" [value]="start()"
+           (change)="clampStart(num($event))" [disabled]="state().running" />
+  </label>
+  <label class="field">
+    <span>Длина, с</span>
+    <select (change)="duration.set(num($event))" [disabled]="state().running">
+      @for (d of [2, 3, 5]; track d) {
+        <option [value]="d" [selected]="d === duration()">{{ d }}</option>
+      }
+    </select>
+  </label>
+  @if (engine() === 'realesrgan') {
+    <label class="check">
+      <input type="checkbox" [checked]="compare()" (change)="compare.set($any($event.target).checked)"
+             [disabled]="state().running" />
+      <span>Сравнить обе модели</span>
+    </label>
+  }
+  <div class="spacer"></div>
+  @if (state().running) {
+    <button type="button" class="btn small" (click)="cancel.emit()">Остановить</button>
+  } @else {
+    <button type="button" class="btn small primary" (click)="submit()">Сделать превью</button>
+  }
+</div>
+
+@if (state().running) {
+  <div class="status">
+    <div class="progress"><i [style.width.%]="state().percent"></i></div>
+    <span>{{ state().label }} · {{ state().percent.toFixed(0) }}%</span>
+  </div>
+}
+
+@if (state().error) {
+  <p class="error">{{ state().error }}</p>
+}
+
+@if (panes().length) {
+  <div class="toolbar">
+    <div class="seg">
+      <button type="button" [class.on]="mode() === 'grid'" (click)="setMode('grid')">Рядом</button>
+      <button type="button" [class.on]="mode() === 'wipe'" (click)="setMode('wipe')">Шторка</button>
+    </div>
+    @if (mode() === 'wipe' && variants().length > 1) {
+      <div class="seg">
+        @for (v of variants(); track v.label) {
+          <button type="button" [class.on]="wipeIndex() === $index" (click)="wipeIndex.set($index)">{{ v.label }}</button>
+        }
+      </div>
+    }
+    <div class="spacer"></div>
+    <button type="button" class="btn small ghost" (click)="restart()">⟲ В начало</button>
+    <button type="button" class="btn small" (click)="togglePlay()">{{ playing() ? '❚❚ Пауза' : '▶ Играть все' }}</button>
+  </div>
+
+  @if (mode() === 'grid') {
+    <div class="grid" [style.--cols]="panes().length > 2 ? 3 : 2">
+      @for (p of panes(); track p.label) {
+        <figure class="pane">
+          <video #vid [src]="p.src" muted loop playsinline preload="auto" (seeked)="sync($event)"></video>
+          <figcaption>
+            <strong>{{ p.label }}</strong>
+            <span>{{ p.note }}</span>
+          </figcaption>
+        </figure>
+      }
+    </div>
+  } @else {
+    <figure class="wipe" [style.--pos.%]="wipe()" [style.aspect-ratio]="info().dar">
+      <video #vid [src]="variants()[wipeIndex()].src" muted loop playsinline preload="auto"></video>
+      <video #vid class="top" [src]="panes()[0].src" muted loop playsinline preload="auto"></video>
+      <div class="handle"></div>
+      <span class="tag left">Оригинал</span>
+      <span class="tag right">{{ variants()[wipeIndex()].label }}</span>
+      <input type="range" min="0" max="100" step="0.5" [value]="wipe()" (input)="wipe.set(num($event))"
+             aria-label="Положение шторки" />
+    </figure>
+    <p class="note">{{ variants()[wipeIndex()].note }}</p>
+  }
+} @else if (!state().running) {
+  <p class="empty">
+    Превью обработает короткий фрагмент с текущими настройками. Так видно качество и примерное время на весь клип,
+    прежде чем запускать полную обработку.
+  </p>
+}

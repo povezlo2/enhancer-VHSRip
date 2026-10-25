@@ -1,0 +1,162 @@
+<fieldset class="panel" [disabled]="disabled()">
+  <!-- 1. Clean-up -->
+  <section class="group">
+    <header class="group-head">
+      <span class="step">1</span>
+      <h3>Очистка</h3>
+    </header>
+
+    <div class="row">
+      <span class="label">Чересстрочность</span>
+      <div class="seg">
+        @for (opt of [['auto', 'Авто'], ['on', 'Убрать'], ['off', 'Не трогать']]; track opt[0]) {
+          <button type="button" [class.on]="options().deinterlace === opt[0]"
+                  (click)="set('deinterlace', $any(opt[0]))">{{ opt[1] }}</button>
+        }
+      </div>
+    </div>
+    <p class="hint">
+      @if (interlaced()) {
+        Найдена гребёнка на {{ (info().interlaceRatio * 100).toFixed(0) }}% кадров ({{ info().interlace | uppercase }}). В режиме «Авто» уберём её фильтром bwdif.
+      } @else {
+        Гребёнки не найдено, видео уже прогрессивное.
+      }
+    </p>
+
+    <div class="row top">
+      <span class="label">Обрезка, px</span>
+      <div class="crop">
+        @for (side of ['top', 'bottom', 'left', 'right']; track side) {
+          <label class="crop-field">
+            <span>{{ { top: 'Сверху', bottom: 'Снизу', left: 'Слева', right: 'Справа' }[side] }}</span>
+            <input type="number" min="0" step="2" [value]="$any(margins())[side]"
+                   (change)="setMargin($any(side), num($event))" />
+          </label>
+        }
+      </div>
+    </div>
+    <p class="hint">
+      Чёрные поля и дрожащую полосу снизу (след головки видеомагнитофона) лучше срезать до апскейла.
+      <button type="button" class="link" (click)="resetCrop()">Как предложил анализ</button>
+    </p>
+
+    <div class="row">
+      <span class="label">Шумоподавление</span>
+      <div class="seg">
+        @for (l of denoiseLabels; track $index) {
+          <button type="button" [class.on]="options().denoise === $index" (click)="set('denoise', $any($index))">{{ l }}</button>
+        }
+      </div>
+    </div>
+    <p class="hint">Сильное (nlmeans) заметно медленнее и может смазать мелкие детали. Для VHS обычно хватает слабого или среднего.</p>
+  </section>
+
+  <!-- 2. Color -->
+  <section class="group">
+    <header class="group-head">
+      <span class="step">2</span>
+      <h3>Цвет</h3>
+      <button type="button" class="link push" (click)="resetColor()">Сбросить</button>
+    </header>
+
+    <label class="row check">
+      <input type="checkbox" [checked]="options().whiteBalance" (change)="set('whiteBalance', $any($event.target).checked)" />
+      <span>Автоматический баланс белого</span>
+    </label>
+
+    @for (s of [
+      { key: 'brightness', label: 'Яркость', min: -0.3, max: 0.3, step: 0.01 },
+      { key: 'contrast', label: 'Контраст', min: 0.7, max: 1.5, step: 0.01 },
+      { key: 'saturation', label: 'Насыщенность', min: 0.5, max: 1.8, step: 0.01 },
+      { key: 'gamma', label: 'Гамма', min: 0.7, max: 1.4, step: 0.01 }
+    ]; track s.key) {
+      <label class="row slider">
+        <span class="label">{{ s.label }}</span>
+        <input type="range" [min]="s.min" [max]="s.max" [step]="s.step" [value]="$any(options())[s.key]"
+               (input)="set($any(s.key), num($event))" />
+        <span class="value">{{ fmt($any(options())[s.key]) }}</span>
+      </label>
+    }
+  </section>
+
+  <!-- 3. Upscale -->
+  <section class="group">
+    <header class="group-head">
+      <span class="step">3</span>
+      <h3>Апскейл</h3>
+    </header>
+
+    <div class="row">
+      <span class="label">Движок</span>
+      <div class="seg">
+        <button type="button" [class.on]="options().engine === 'realesrgan'" (click)="set('engine', 'realesrgan')">Нейросеть</button>
+        <button type="button" [class.on]="options().engine === 'ffmpeg'" (click)="set('engine', 'ffmpeg')">Быстро (ffmpeg)</button>
+      </div>
+    </div>
+
+    @if (options().engine === 'realesrgan') {
+      <div class="models">
+        @for (m of models; track m.id) {
+          <button type="button" class="model" [class.on]="options().model === m.id" (click)="setModel(m.id)">
+            <strong>{{ m.title }}</strong>
+            <span>{{ m.hint }}</span>
+          </button>
+        }
+      </div>
+
+      <div class="row">
+        <span class="label">Масштаб</span>
+        <div class="seg">
+          @for (s of [2, 3, 4]; track s) {
+            <button type="button" [class.on]="options().scale === s" [disabled]="!model().scales.includes(s)"
+                    (click)="set('scale', s)">×{{ s }}</button>
+          }
+        </div>
+      </div>
+    } @else {
+      <p class="hint">Масштабирование lanczos с резкостью, без нейросети. Работает быстрее реального времени, но детали не восстанавливает.</p>
+    }
+
+    <div class="row">
+      <span class="label">Итоговая высота</span>
+      <div class="seg">
+        @for (h of heights; track h.value) {
+          <button type="button" [class.on]="options().targetHeight === h.value" (click)="setHeight('' + h.value)">{{ h.label }}</button>
+        }
+      </div>
+    </div>
+
+    <div class="output-size" [class.warn]="geo().overstretch">
+      <span>{{ geo().srcW }}×{{ geo().srcH }}</span>
+      <span class="arrow">→</span>
+      <strong>{{ geo().outW }}×{{ geo().outH }}</strong>
+    </div>
+    @if (geo().overstretch) {
+      <p class="hint warn">Цель больше, чем восстанавливает выбранный масштаб: остаток будет обычным растягиванием, и картинка станет «пластиковой».</p>
+    }
+  </section>
+
+  <!-- 4. Finish -->
+  <section class="group">
+    <header class="group-head">
+      <span class="step">4</span>
+      <h3>Финиш</h3>
+    </header>
+
+    <div class="row">
+      <span class="label">Резкость</span>
+      <div class="seg">
+        @for (l of sharpenLabels; track $index) {
+          <button type="button" [class.on]="options().sharpen === $index" (click)="set('sharpen', $any($index))">{{ l }}</button>
+        }
+      </div>
+    </div>
+
+    <label class="row slider">
+      <span class="label">Качество (CRF)</span>
+      <input type="range" min="12" max="24" step="1" [value]="options().crf" (input)="set('crf', num($event))" />
+      <span class="value">{{ options().crf }}</span>
+    </label>
+    <p class="hint">Меньше значит лучше и больше файл. 16 почти неотличимо от исходника, 20 заметно компактнее.</p>
+  </section>
+</fieldset>
