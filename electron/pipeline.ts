@@ -4,7 +4,7 @@ import path from 'node:path';
 import { even, geometry, type Geometry } from '../shared/geometry';
 import type { JobProgress, ProcessOptions, VideoInfo } from '../shared/types';
 import { runOk } from './proc';
-import { modelsDir, requireTool } from './tools';
+import { modelsDir, requireTool, tools } from './tools';
 
 export { geometry };
 
@@ -151,13 +151,18 @@ export async function processClip(job: ClipRun): Promise<void> {
     const frames = readdirSync(inDir).length;
     if (!frames) throw new Error('ffmpeg не извлёк ни одного кадра.');
 
-    // 2. Neural upscale (10..90%). Progress = files written to outDir.
+    // Progress bands: with faces, upscale 10..65, faces 65..92, encode 92..100; otherwise upscale 10..90.
+    const facesDir = o.faceRestore ? requireFaces() : null;
+    const upEnd = facesDir ? 65 : 90;
+    const encStart = facesDir ? 92 : 90;
+
+    // 2. Neural upscale. Progress = files written to outDir.
     const started = Date.now();
     const scale = o.model === 'realesrgan-x4plus' ? 4 : o.scale;
     const timer = setInterval(() => {
       const done = safeCount(outDir);
       report({
-        stage: 'upscale', percent: 10 + (done / frames) * 80, framesDone: done, framesTotal: frames,
+        stage: 'upscale', percent: 10 + (done / frames) * (upEnd - 10), framesDone: done, framesTotal: frames,
         etaSec: eta(started, done, frames),
       });
     }, 700);
@@ -171,8 +176,30 @@ export async function processClip(job: ClipRun): Promise<void> {
     }
     rmSync(inDir, { recursive: true, force: true }); // free disk early
 
-    // 3. Resize to target, sharpen, encode with source audio (90..100%).
-    report({ stage: 'encode', percent: 90, framesTotal: frames });
+    // 3. Optional: restore faces in the upscaled frames (in place), in a separate process.
+    if (facesDir) {
+      report({ stage: 'faces', percent: upEnd, framesDone: 0, framesTotal: frames, faces: 0 });
+      const facesStarted = Date.now();
+      await runOk(process.execPath, [
+        path.join(__dirname, 'faces', 'cli.js'),
+        '--dir', outDir, '--models', facesDir, '--strength', String(o.faceStrength),
+      ], {
+        signal,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        onStdout: lineParser((line) => {
+          const m = /^progress (\d+) (\d+) (\d+)/.exec(line);
+          if (!m) return;
+          const [done, all, faces] = m.slice(1).map(Number);
+          report({
+            stage: 'faces', percent: upEnd + (done / all) * (encStart - upEnd), framesDone: done, framesTotal: all,
+            faces, etaSec: eta(facesStarted, done, all),
+          });
+        }),
+      });
+    }
+
+    // 4. Resize to target, sharpen, encode with source audio.
+    report({ stage: 'encode', percent: encStart, framesTotal: frames });
     await runOk(ffmpeg, [
       '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
       '-framerate', String(info.fps), '-i', path.join(outDir, '%08d.png'),
@@ -183,7 +210,8 @@ export async function processClip(job: ClipRun): Promise<void> {
     ], {
       signal,
       onStdout: frameProgress((n) => report({
-        stage: 'encode', percent: 90 + Math.min(9.9, (n / frames) * 10), framesDone: n, framesTotal: frames,
+        stage: 'encode', percent: encStart + Math.min(99.9 - encStart, (n / frames) * (100 - encStart)),
+        framesDone: n, framesTotal: frames,
       })),
     });
     report({ stage: 'done', percent: 100, output });
@@ -203,6 +231,23 @@ export async function originalPreview(info: VideoInfo, o: ProcessOptions, output
     '-vf', [...crop, `scale=${g.outW}:${g.outH}:flags=bicubic`, 'format=yuv420p', 'setsar=1'].join(','),
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-c:a', 'aac', '-b:a', '128k', output,
   ], { signal });
+}
+
+function requireFaces(): string {
+  const dir = tools().faces;
+  if (!dir) throw new Error('Не найдены модели для лиц. Запустите «npm run setup» в папке проекта.');
+  return dir;
+}
+
+/** Split a stream into lines and call `onLine` for each complete line. */
+function lineParser(onLine: (line: string) => void) {
+  let buf = '';
+  return (chunk: string) => {
+    buf += chunk;
+    const lines = buf.split(/\r?\n/);
+    buf = lines.pop() ?? '';
+    lines.forEach(onLine);
+  };
 }
 
 function safeCount(dir: string): number {

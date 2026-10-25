@@ -21,6 +21,8 @@ export class SettingsPanel {
   readonly info = input.required<VideoInfo>();
   readonly options = input.required<ProcessOptions>();
   readonly disabled = input(false);
+  /** Face models are installed (bin/faces). */
+  readonly facesAvailable = input(false);
   readonly optionsChange = output<Partial<ProcessOptions>>();
 
   readonly models = MODELS;
@@ -35,6 +37,7 @@ export class SettingsPanel {
 
   readonly geo = computed(() => geometry(this.info(), this.options()));
   readonly model = computed(() => MODELS.find((m) => m.id === this.options().model) ?? MODELS[0]);
+  readonly facesUsable = computed(() => this.facesAvailable() && this.options().engine === 'realesrgan');
   readonly interlaced = computed(() => this.info().interlace === 'tff' || this.info().interlace === 'bff');
 
   readonly margins = computed<Margins>(() => {

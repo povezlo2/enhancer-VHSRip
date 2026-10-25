@@ -2,6 +2,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import type { ToolsStatus } from '../shared/types';
+import { FACE_MODELS } from './faces/models';
 
 const EXE = process.platform === 'win32' ? '.exe' : '';
 
@@ -43,9 +44,17 @@ export function tools(refresh = false): ToolsStatus {
     ffprobe: locate('ffprobe', 'ffmpeg'),
     realesrgan,
     models: realesrgan ? listModels(path.join(path.dirname(realesrgan), 'models')) : [],
+    faces: facesDir(),
     binDir: binDir(),
   };
   return cache;
+}
+
+/** bin/faces with both face models present, else null. */
+function facesDir(): string | null {
+  const dir = path.join(binDir(), 'faces');
+  const ok = Object.values(FACE_MODELS).every((f) => existsSync(path.join(dir, f)));
+  return ok ? dir : null;
 }
 
 export function modelsDir(): string | null {

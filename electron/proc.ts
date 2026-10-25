@@ -8,6 +8,7 @@ export interface RunResult {
 
 export interface RunOptions {
   signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
   /** Keep at most this many characters of each stream (tail). */
@@ -25,7 +26,7 @@ export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise
   const keep = opts.keep ?? 64_000;
   return new Promise((resolve, reject) => {
     if (opts.signal?.aborted) return reject(new CancelledError());
-    const child = spawn(cmd, args, { windowsHide: true, signal: opts.signal });
+    const child = spawn(cmd, args, { windowsHide: true, signal: opts.signal, env: opts.env });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');

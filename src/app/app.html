@@ -64,6 +64,7 @@
                 {{ stageLabel(c) }}
                 @if (isActive(c.stage) && c.stage !== 'queued') {
                   · {{ c.percent.toFixed(0) }}%
+                  @if (c.stage === 'faces' && c.faces !== undefined) { · лиц: {{ c.faces }} }
                   @if (c.etaSec !== undefined) { · ещё {{ formatDuration(c.etaSec) }} }
                 }
               </span>
@@ -140,7 +141,7 @@
 
         <div class="tab-body">
           @if (tab() === 'settings') {
-            <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()"
+            <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()" [facesAvailable]="!!store.tools()?.faces"
                                 (optionsChange)="updateSelected($event)" />
           } @else {
             <app-preview-compare [info]="info" [state]="store.preview()" [engine]="c.options.engine"

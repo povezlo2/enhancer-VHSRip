@@ -48,7 +48,7 @@ function createMock(): EnhancerApi {
   return {
     tools: async (): Promise<ToolsStatus> => ({
       ffmpeg: 'mock', ffprobe: 'mock', realesrgan: 'mock',
-      models: ['realesr-animevideov3', 'realesrgan-x4plus'], binDir: '(mock)',
+      models: ['realesr-animevideov3', 'realesrgan-x4plus'], faces: '(mock)', binDir: '(mock)',
     }),
     openFiles: async () => ['C:/Видео/demo_clip.avi'],
     chooseDir: async () => 'C:/Видео/out',

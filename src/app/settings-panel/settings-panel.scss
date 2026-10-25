@@ -244,3 +244,15 @@ input[type='range'] {
     border-color: var(--warn);
   }
 }
+
+.hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  font: 12px var(--mono);
+}
+
+.row.check.off {
+  cursor: default;
+  opacity: 0.55;
+}
