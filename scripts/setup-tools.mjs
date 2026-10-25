@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import extract from 'extract-zip';
+import AdmZip from 'adm-zip';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bin = path.join(root, 'bin');
@@ -61,6 +61,16 @@ function findFile(dir, name) {
   return null;
 }
 
+/**
+ * Synchronous extraction. extract-zip (stream based) could hang on Windows without ever
+ * settling, which made Node exit silently mid-setup ("unsettled top-level await").
+ */
+function unzip(zip, dir) {
+  console.log('  распаковка…');
+  mkdirSync(dir, { recursive: true });
+  new AdmZip(zip).extractAllTo(dir, true);
+}
+
 async function withTemp(fn) {
   const tmp = path.join(os.tmpdir(), `enhancer-setup-${Date.now()}`);
   mkdirSync(tmp, { recursive: true });
@@ -83,7 +93,7 @@ async function setupRealesrgan() {
     const zip = path.join(tmp, file);
     await download(REALESRGAN_BASE + file, zip);
     const out = path.join(tmp, 'x');
-    await extract(zip, { dir: out });
+    unzip(zip, out);
     const binary = findFile(out, exe('realesrgan-ncnn-vulkan'));
     if (!binary) throw new Error('В архиве Real-ESRGAN не найден исполняемый файл');
     // Copy only what the app needs: the binary, its DLLs and the models.
@@ -119,7 +129,7 @@ async function setupFfmpeg() {
     const zip = path.join(tmp, 'ffmpeg.zip');
     await download(FFMPEG_WIN, zip);
     const out = path.join(tmp, 'x');
-    await extract(zip, { dir: out });
+    unzip(zip, out);
     const ffmpeg = findFile(out, 'ffmpeg.exe');
     const ffprobe = findFile(out, 'ffprobe.exe');
     if (!ffmpeg || !ffprobe) throw new Error('В архиве ffmpeg не найдены ffmpeg.exe/ffprobe.exe');
