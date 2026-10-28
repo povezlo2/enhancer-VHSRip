@@ -1,6 +1,7 @@
 // Dev-only smoke test: launches the real Electron app, stubs the file dialog with a test clip,
 // clicks through the UI and saves screenshots.
 // Usage: npm run build && npx electron scripts/smoke.cjs <clip> <outDir>
+// (Linux CI / containers: xvfb-run -a npx electron --no-sandbox scripts/smoke.cjs <clip> <outDir>)
 const { app, BrowserWindow, dialog } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -11,6 +12,8 @@ if (!clip || !fs.existsSync(clip)) {
   process.exit(2);
 }
 fs.mkdirSync(outDir, { recursive: true });
+// Fresh profile: no cached fragments or saved settings from earlier runs.
+app.setPath('userData', fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'enhancer-smoke-')));
 
 dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path.resolve(clip)] });
 require(path.join(__dirname, '..', 'dist-electron', 'electron', 'main.js'));
@@ -51,14 +54,24 @@ app.whenReady().then(async () => {
     await sleep(400);
     await shot(win, '2-settings.png');
 
-    // Fast engine so the preview finishes quickly without a GPU.
+    // Fast engine so everything finishes quickly without a GPU.
     await click(wc, 'Быстро (ffmpeg)');
+
+    // Fragment editor: playable proxy, scene detection, timeline.
+    await click(wc, 'Фрагменты');
+    await waitFor(wc, `(document.querySelector('app-segment-editor video')?.readyState ?? 0) >= 2`, 60000);
+    await click(wc, 'Нарезать по сценам');
+    await waitFor(wc, `!document.body.innerText.includes('Автоматически:') && document.querySelectorAll('.timeline .block').length >= 2`, 60000);
+    console.log('fragments', await wc.executeJavaScript(`document.querySelectorAll('.timeline .block').length`));
+    await sleep(400);
+    await shot(win, '3-fragments.png');
+
     await click(wc, 'Превью');
     await sleep(300);
     await click(wc, 'Сделать превью');
     await waitFor(wc, `document.querySelectorAll('video').length >= 2`);
     await waitFor(wc, `[...document.querySelectorAll('video')].every(v => v.readyState >= 2)`, 30000);
-    await shot(win, '3-preview.png');
+    await shot(win, '3b-preview.png');
 
     await click(wc, 'Шторка');
     await sleep(800);
@@ -68,6 +81,10 @@ app.whenReady().then(async () => {
     await waitFor(wc, `document.body.innerText.includes('Готово:')`, 180000);
     await sleep(300);
     await shot(win, '5-done.png');
+    await click(wc, 'Фрагменты');
+    await sleep(500);
+    console.log('states', await wc.executeJavaScript(`[...document.querySelectorAll('.timeline .block')].map(b => b.dataset.state).join(',')`));
+    await shot(win, '6-fragments-done.png');
     console.log('SMOKE OK');
     app.exit(0);
   } catch (err) {

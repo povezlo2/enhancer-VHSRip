@@ -1,5 +1,7 @@
 // Types shared between the Electron main process and the Angular renderer.
 
+import type { Segment } from './segments';
+
 export type InterlaceKind = 'progressive' | 'tff' | 'bff' | 'unknown';
 
 export interface CropRect {
@@ -22,7 +24,11 @@ export interface VideoInfo {
   dar: number;
   fps: number;
   fpsText: string;
+  /** Exact frame rate as ffmpeg writes it (e.g. 30000/1001), used for frame-exact timing. */
+  fpsRational: string;
   duration: number;
+  /** Timestamp of the first frame in seconds (non-zero in e.g. MPEG-TS and VOB files). */
+  startTime: number;
   frames: number;
   videoCodec: string;
   videoBitrateKbps?: number;
@@ -61,6 +67,27 @@ export const MODELS: ModelDescriptor[] = [
   },
 ];
 
+export type FaceModelId = 'gfpgan' | 'codeformer';
+
+export interface FaceModelDescriptor {
+  id: FaceModelId;
+  title: string;
+  hint: string;
+}
+
+export const FACE_MODEL_INFO: FaceModelDescriptor[] = [
+  {
+    id: 'codeformer',
+    title: 'CodeFormer',
+    hint: 'Бережнее к чертам лица: ползунок «Похожесть» решает, сколько оставить от оригинала. Только для некоммерческого использования.',
+  },
+  {
+    id: 'gfpgan',
+    title: 'GFPGAN 1.4',
+    hint: 'Быстрее и ярче, но чаще делает лицо «гладким» и немного чужим.',
+  },
+];
+
 export type TargetHeight = 'auto' | 576 | 720 | 1080;
 
 export interface ProcessOptions {
@@ -79,8 +106,11 @@ export interface ProcessOptions {
   contrast: number; // 0.7 .. 1.5, 1 = unchanged
   saturation: number; // 0.5 .. 1.8, 1 = unchanged
   gamma: number; // 0.7 .. 1.4, 1 = unchanged
-  /** Restore faces with GFPGAN after upscaling (neural engine only). */
+  /** Restore faces after upscaling (neural engine only). */
   faceRestore: boolean;
+  faceModel: FaceModelId;
+  /** CodeFormer only, 0..1: higher keeps more of the original face, lower invents more detail. */
+  faceFidelity: number;
   /** 0.1..1: how much of the restored face is blended in (lower = more natural). */
   faceStrength: number;
   /** 0 = off .. 3 = strong, applied after upscaling. */
@@ -106,12 +136,17 @@ export const DEFAULT_OPTIONS: ProcessOptions = {
   saturation: 1,
   gamma: 1,
   faceRestore: false,
+  faceModel: 'codeformer',
+  faceFidelity: 0.7,
   faceStrength: 0.6,
   sharpen: 1,
   crf: 16,
 };
 
-export type JobStage = 'queued' | 'prepare' | 'upscale' | 'faces' | 'encode' | 'done' | 'error' | 'cancelled';
+export type JobStage =
+  | 'queued' | 'prepare' | 'upscale' | 'faces' | 'encode' | 'assemble' | 'done' | 'error' | 'cancelled';
+
+export type SegmentState = 'pending' | 'running' | 'done' | 'cached' | 'error';
 
 export interface JobProgress {
   jobId: string;
@@ -125,6 +160,11 @@ export interface JobProgress {
   faces?: number;
   message?: string;
   output?: string;
+  /** Fragment being processed (0-based) and how many there are. */
+  segmentIndex?: number;
+  segmentCount?: number;
+  /** State of every fragment, in order. */
+  segments?: SegmentState[];
 }
 
 export interface PreviewRequest {
@@ -141,13 +181,27 @@ export interface PreviewResult {
   variants: { model: ModelId | 'ffmpeg'; file: string; seconds: number }[];
 }
 
+export interface SceneRequest {
+  path: string;
+  /** Scene-change sensitivity, 0.1 (many cuts) .. 0.6 (only hard cuts). */
+  threshold: number;
+}
+
+export interface CacheInfo {
+  dir: string;
+  bytes: number;
+  files: number;
+}
+
 export interface ToolsStatus {
   ffmpeg: string | null;
   ffprobe: string | null;
   realesrgan: string | null;
   models: string[];
-  /** Folder with the face models, or null if they are missing. */
+  /** Folder with the face models, or null if the detector or every restorer is missing. */
   faces: string | null;
+  /** Face restorers whose model file is installed. */
+  faceModels: FaceModelId[];
   binDir: string;
 }
 
@@ -157,10 +211,17 @@ export interface EnhancerApi {
   chooseDir(): Promise<string | null>;
   pathForFile(file: File): string;
   analyze(path: string): Promise<VideoInfo>;
-  enqueue(path: string, options: ProcessOptions, outDir: string | null): Promise<string>;
+  /** `segments` = fragments to cut the clip into; null = automatic fixed-length fragments. */
+  enqueue(path: string, options: ProcessOptions, outDir: string | null, segments: Segment[] | null): Promise<string>;
   cancel(jobId: string): Promise<void>;
   preview(req: PreviewRequest): Promise<PreviewResult>;
   cancelPreview(): Promise<void>;
+  /** Frames where a new scene starts. */
+  detectScenes(req: SceneRequest): Promise<number[]>;
+  /** Small H.264 copy of the source that the browser can play (AVI/XviD often cannot). */
+  proxy(path: string): Promise<string>;
+  cacheInfo(): Promise<CacheInfo>;
+  clearCache(): Promise<CacheInfo>;
   mediaUrl(path: string): string;
   showInFolder(path: string): Promise<void>;
   onProgress(cb: (p: JobProgress) => void): () => void;

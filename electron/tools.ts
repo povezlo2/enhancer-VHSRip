@@ -1,8 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import type { ToolsStatus } from '../shared/types';
-import { FACE_MODELS } from './faces/models';
+import type { FaceModelId, ToolsStatus } from '../shared/types';
+import { FACE_DETECTOR, FACE_RESTORERS } from './faces/models';
 
 const EXE = process.platform === 'win32' ? '.exe' : '';
 
@@ -39,22 +39,26 @@ let cache: ToolsStatus | null = null;
 export function tools(refresh = false): ToolsStatus {
   if (cache && !refresh) return cache;
   const realesrgan = locate('realesrgan-ncnn-vulkan', 'realesrgan');
+  const faceModels = installedFaceModels();
   cache = {
     ffmpeg: locate('ffmpeg', 'ffmpeg'),
     ffprobe: locate('ffprobe', 'ffmpeg'),
     realesrgan,
     models: realesrgan ? listModels(path.join(path.dirname(realesrgan), 'models')) : [],
-    faces: facesDir(),
+    faces: faceModels.length ? facesRoot() : null,
+    faceModels,
     binDir: binDir(),
   };
   return cache;
 }
 
-/** bin/faces with both face models present, else null. */
-function facesDir(): string | null {
-  const dir = path.join(binDir(), 'faces');
-  const ok = Object.values(FACE_MODELS).every((f) => existsSync(path.join(dir, f)));
-  return ok ? dir : null;
+const facesRoot = () => path.join(binDir(), 'faces');
+
+/** Restorers usable right now: the detector plus that restorer's model are in bin/faces. */
+function installedFaceModels(): FaceModelId[] {
+  const dir = facesRoot();
+  if (!existsSync(path.join(dir, FACE_DETECTOR))) return [];
+  return (Object.keys(FACE_RESTORERS) as FaceModelId[]).filter((id) => existsSync(path.join(dir, FACE_RESTORERS[id])));
 }
 
 export function modelsDir(): string | null {

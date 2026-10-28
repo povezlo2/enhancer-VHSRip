@@ -1,8 +1,10 @@
 import { LowerCasePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { geometry } from '../../shared/geometry';
+import type { Segment } from '../../shared/segments';
 import type { ProcessOptions } from '../../shared/types';
 import { formatDuration, PreviewCompare, PreviewRun } from './preview-compare/preview-compare';
+import { SegmentEditor, type SegmentPreview } from './segment-editor/segment-editor';
 import { SettingsPanel } from './settings-panel/settings-panel';
 import { Clip, isActive, Store } from './store';
 
@@ -12,6 +14,7 @@ const STAGE_LABEL: Record<string, string> = {
   upscale: 'Апскейл',
   faces: 'Лица',
   encode: 'Кодирование',
+  assemble: 'Склейка',
   done: 'Готово',
   error: 'Ошибка',
   cancelled: 'Отменено',
@@ -19,7 +22,7 @@ const STAGE_LABEL: Record<string, string> = {
 
 @Component({
   selector: 'app-root',
-  imports: [SettingsPanel, PreviewCompare, LowerCasePipe],
+  imports: [SettingsPanel, PreviewCompare, SegmentEditor, LowerCasePipe],
   templateUrl: './app.html',
   styleUrl: './app.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -32,7 +35,7 @@ const STAGE_LABEL: Record<string, string> = {
 export class App {
   protected readonly store = inject(Store);
   protected readonly dragging = signal(false);
-  protected readonly tab = signal<'settings' | 'preview'>('settings');
+  protected readonly tab = signal<'settings' | 'segments' | 'preview'>('settings');
   protected readonly mediaUrl = (p: string) => this.store.api.mediaUrl(p);
 
   protected readonly selected = this.store.selected;
@@ -47,6 +50,41 @@ export class App {
   }
 
   protected isActive = isActive;
+
+  protected openTab(tab: 'settings' | 'segments' | 'preview') {
+    this.tab.set(tab);
+    const c = this.selected();
+    if (tab === 'segments' && c) void this.store.loadProxy(c.id);
+  }
+
+  protected setSegments(segments: Segment[] | null) {
+    const c = this.selected();
+    if (c) this.store.setSegments(c.id, segments);
+  }
+
+  protected detectScenes(threshold: number) {
+    const c = this.selected();
+    if (c) void this.store.detectScenes(c.id, threshold);
+  }
+
+  protected previewSegment(p: SegmentPreview) {
+    const c = this.selected();
+    if (!c) return;
+    this.tab.set('preview');
+    void this.store.runPreview(c.id, p.start, p.duration, false);
+  }
+
+  protected segmentLabel(c: Clip): string {
+    const n = c.segmentStates?.length ?? 0;
+    if (n < 2 || c.segmentIndex === undefined) return '';
+    return ` · фрагмент ${c.segmentIndex + 1}/${n}`;
+  }
+
+  protected formatBytes(bytes: number): string {
+    if (bytes < 1024 ** 2) return `${Math.round(bytes / 1024)} КБ`;
+    if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(0)} МБ`;
+    return `${(bytes / 1024 ** 3).toFixed(1)} ГБ`;
+  }
   protected formatDuration = formatDuration;
 
   protected outSize(c: Clip): string {
@@ -58,7 +96,7 @@ export class App {
   protected engineLabel(o: ProcessOptions): string {
     if (o.engine === 'ffmpeg') return 'ffmpeg';
     const model = o.model === 'realesrgan-x4plus' ? 'x4plus' : `animevideov3 ×${o.scale}`;
-    return o.faceRestore ? `${model} + лица` : model;
+    return o.faceRestore ? `${model} + ${o.faceModel === 'codeformer' ? 'CodeFormer' : 'GFPGAN'}` : model;
   }
 
   protected updateSelected(patch: Partial<ProcessOptions>) {

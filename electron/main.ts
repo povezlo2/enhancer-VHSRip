@@ -1,11 +1,17 @@
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { JobProgress, PreviewRequest, PreviewResult, ProcessOptions } from '../shared/types';
+import type { Segment } from '../shared/segments';
+import type {
+  CacheInfo, JobProgress, PreviewRequest, PreviewResult, ProcessOptions, SceneRequest, VideoInfo,
+} from '../shared/types';
 import { analyze } from './analyze';
+import { ChunkCache } from './cache';
 import { originalPreview, processClip, TMP_ROOT } from './pipeline';
+import { proxyFor } from './proxy';
 import { JobQueue } from './queue';
+import { detectScenes } from './scenes';
 import { tools } from './tools';
 
 const DEV_URL = process.env.ENHANCER_DEV_URL; // set by `npm run dev`
@@ -21,10 +27,13 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true } },
 ]);
 
-const queue = new JobQueue((p: JobProgress) => {
-  if (p.output) allow(p.output);
-  win?.webContents.send('job:progress', p);
-});
+// Rendered fragments and editor proxies live in the user profile, so they survive restarts.
+const cacheRoot = () => path.join(app.getPath('userData'), 'cache');
+const proxiesDir = () => path.join(cacheRoot(), 'proxies');
+let chunkCache: ChunkCache | null = null;
+const cache = () => (chunkCache ??= new ChunkCache(path.join(cacheRoot(), 'fragments')));
+
+let queue: JobQueue;
 
 let previewController: AbortController | null = null;
 
@@ -55,6 +64,30 @@ function createWindow() {
   else void win.loadFile(path.join(__dirname, '..', '..', 'dist', 'renderer', 'browser', 'index.html'));
 }
 
+/** Analysis results per file version, so the editor's scene search and proxy don't re-run idet/cropdetect. */
+const analyzed = new Map<string, Promise<VideoInfo>>();
+function analyzeCached(file: string): Promise<VideoInfo> {
+  const st = statSync(file);
+  const key = `${path.resolve(file)}|${st.size}|${st.mtimeMs}`;
+  let info = analyzed.get(key);
+  if (!info) {
+    info = analyze(file);
+    info.catch(() => analyzed.delete(key));
+    analyzed.set(key, info);
+  }
+  return info;
+}
+
+function cacheInfo(): CacheInfo {
+  const chunks = cache().info();
+  const proxies = existsSync(proxiesDir()) ? readdirSync(proxiesDir()).map((f) => statSync(path.join(proxiesDir(), f)).size) : [];
+  return {
+    dir: cacheRoot(),
+    files: chunks.files + proxies.length,
+    bytes: chunks.bytes + proxies.reduce((a, b) => a + b, 0),
+  };
+}
+
 function registerIpc() {
   ipcMain.handle('tools', () => tools(true));
 
@@ -75,11 +108,26 @@ function registerIpc() {
 
   ipcMain.handle('analyze', (_e, file: string) => {
     allow(file); // dropped files arrive here first
-    return analyze(file);
+    return analyzeCached(file);
   });
 
-  ipcMain.handle('job:enqueue', (_e, file: string, options: ProcessOptions, outDir: string | null) =>
-    queue.enqueue(file, options, outDir));
+  ipcMain.handle('job:enqueue', (_e, file: string, options: ProcessOptions, outDir: string | null, segments: Segment[] | null) =>
+    queue.enqueue(file, options, outDir, segments));
+
+  ipcMain.handle('scenes', async (_e, req: SceneRequest) => detectScenes(await analyzeCached(req.path), req.threshold));
+
+  ipcMain.handle('proxy', async (_e, file: string) => {
+    const proxy = await proxyFor(await analyzeCached(file), proxiesDir());
+    allow(proxy);
+    return proxy;
+  });
+
+  ipcMain.handle('cache:info', () => cacheInfo());
+  ipcMain.handle('cache:clear', () => {
+    cache().clear();
+    rmSync(proxiesDir(), { recursive: true, force: true });
+    return cacheInfo();
+  });
 
   ipcMain.handle('job:cancel', (_e, id: string) => queue.cancel(id));
 
@@ -91,7 +139,7 @@ function registerIpc() {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
 
-    const info = await analyze(req.path);
+    const info = await analyzeCached(req.path);
     const base: ProcessOptions = { ...req.options, start: req.start, duration: req.duration, crf: 18 };
     const send = (p: Omit<JobProgress, 'jobId'>, label: string) =>
       win?.webContents.send('preview:progress', { ...p, jobId: 'preview', message: label });
@@ -111,7 +159,7 @@ function registerIpc() {
       const file = path.join(dir, `variant-${i}-${label}.mp4`);
       const started = Date.now();
       await processClip({
-        info, options: o, output: file, signal: controller.signal, fast: true,
+        info, options: o, output: file, signal: controller.signal, fast: true, cache: cache(),
         report: (p) => send(p, `${i + 1}/${runs.length}: ${label}`),
       });
       allow(file);
@@ -136,6 +184,10 @@ void app.whenReady().then(() => {
     if (!allowedMedia.has(resolved)) return new Response('forbidden', { status: 403 });
     return net.fetch(pathToFileURL(resolved).toString(), { headers: req.headers });
   });
+  queue = new JobQueue((p: JobProgress) => {
+    if (p.output) allow(p.output);
+    win?.webContents.send('job:progress', p);
+  }, cache());
   registerIpc();
   createWindow();
   app.on('activate', () => {
@@ -144,7 +196,7 @@ void app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  queue.cancelAll();
+  queue?.cancelAll();
   previewController?.abort();
   if (process.platform !== 'darwin') app.quit();
 });

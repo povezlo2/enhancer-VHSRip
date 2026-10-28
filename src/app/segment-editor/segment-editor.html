@@ -1,0 +1,90 @@
+<div class="player">
+  @if (proxySrc(); as src) {
+    <video #video [src]="src" preload="auto" (timeupdate)="onTime()" (seeked)="onTime()"
+           (play)="playing.set(true)" (pause)="playing.set(false)" (click)="togglePlay()"></video>
+  } @else if (proxyError()) {
+    <p class="error">{{ proxyError() }}</p>
+  } @else {
+    <div class="placeholder">Готовлю копию для просмотра…</div>
+  }
+</div>
+
+<div class="transport">
+  <button type="button" class="btn small" (click)="step(-1)" title="Кадр назад (←)">‹</button>
+  <button type="button" class="btn small" (click)="togglePlay()" [disabled]="!proxySrc()">{{ playing() ? 'Пауза' : 'Играть' }}</button>
+  <button type="button" class="btn small" (click)="step(1)" title="Кадр вперёд (→)">›</button>
+  <span class="tc">{{ time(frame()) }} · кадр {{ frame() }}</span>
+  <div class="spacer"></div>
+  <button type="button" class="btn small" (click)="splitHere()" [disabled]="disabled() || !canSplit()"
+          title="Начать новый фрагмент с текущего кадра">✂ Разрезать здесь</button>
+</div>
+
+<div class="timeline" (click)="onTimelineClick($event)" role="slider" tabindex="0" aria-label="Фрагменты"
+     [attr.aria-valuenow]="frame()" aria-valuemin="0" [attr.aria-valuemax]="total() - 1">
+  @for (b of blocks(); track b.segment.start) {
+    <button type="button" class="block" [attr.data-state]="b.state" [class.on]="b.index === selected()"
+            [style.left.%]="b.left" [style.width.%]="b.width" (click)="selectBlock(b.index, $event)"
+            [title]="time(b.segment.start) + ' – ' + time(b.segment.end)">
+      @if (b.faces === true) { <span class="mark">☺</span> }
+      @if (b.faces === false) { <span class="mark off">☺</span> }
+    </button>
+  }
+  <i class="playhead" [style.left.%]="playhead()"></i>
+</div>
+<div class="legend">
+  @if (auto()) {
+    <span>Автоматически: {{ summary().count }} фрагм. по ≤10 с. Нарежьте по сценам или вручную, чтобы управлять ими.</span>
+  } @else {
+    <span>{{ summary().count }} фрагм. · от {{ summary().min.toFixed(1) }} до {{ summary().max.toFixed(1) }} с</span>
+  }
+  @if (states()) {
+    <span class="keys">
+      <i data-state="done"></i>готов <i data-state="cached"></i>из кэша <i data-state="running"></i>в работе
+    </span>
+  }
+</div>
+
+<fieldset class="tools" [disabled]="disabled()">
+  <div class="row">
+    <label class="field">
+      <span>Чувствительность</span>
+      <select (change)="threshold.set(+$any($event.target).value)">
+        @for (s of sensitivity; track s.value) {
+          <option [value]="s.value" [selected]="s.value === threshold()">{{ s.label }}</option>
+        }
+      </select>
+    </label>
+    <button type="button" class="btn small" (click)="detect.emit(threshold())" [disabled]="detecting()">
+      {{ detecting() ? 'Ищу сцены…' : 'Нарезать по сценам' }}
+    </button>
+    <button type="button" class="btn small ghost" (click)="fixed()">Ровно по 10 с</button>
+    @if (!auto()) {
+      <button type="button" class="link small" (click)="reset()">Сбросить на авто</button>
+    }
+  </div>
+  <p class="hint">Сцены короче 5 с присоединяются к соседним, длиннее 10 с делятся поровну. Стыки незаметны: каждый фрагмент
+    обрабатывается с запасом соседних кадров.</p>
+
+  @if (current(); as s) {
+    <div class="selected">
+      <div class="sel-head">
+        <strong>Фрагмент {{ selected() + 1 }}</strong>
+        <span class="mono">{{ time(s.start) }} – {{ time(s.end) }} · {{ seconds(s.end - s.start) }} с · {{ s.end - s.start }} кадров</span>
+      </div>
+      <div class="row">
+        <button type="button" class="btn small ghost" (click)="mergePrev()" [disabled]="selected() === 0">← Объединить с предыдущим</button>
+        <button type="button" class="btn small ghost" (click)="mergeNext()" [disabled]="selected() >= effective().length - 1">Объединить со следующим →</button>
+        <button type="button" class="btn small" (click)="previewCurrent()">Превью фрагмента</button>
+      </div>
+      <label class="field wide">
+        <span>Лица в этом фрагменте</span>
+        <select (change)="setFaces($any($event.target).value)">
+          <option value="inherit" [selected]="facesValue() === 'inherit'">Как в настройках ({{ facesEnabled() ? 'вкл.' : 'выкл.' }})</option>
+          <option value="on" [selected]="facesValue() === 'on'">Улучшать</option>
+          <option value="off" [selected]="facesValue() === 'off'">Не трогать</option>
+        </select>
+      </label>
+      <p class="hint">Улучшение лиц имеет смысл на крупных планах. На общих планах его лучше выключить: быстрее и без риска «чужих» лиц.</p>
+    </div>
+  }
+</fieldset>

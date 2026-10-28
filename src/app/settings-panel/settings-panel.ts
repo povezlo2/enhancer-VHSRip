@@ -1,7 +1,9 @@
 import { UpperCasePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, input, output } from '@angular/core';
 import { geometry } from '../../../shared/geometry';
-import { CropRect, MODELS, ModelId, ProcessOptions, TargetHeight, VideoInfo } from '../../../shared/types';
+import {
+  CropRect, FACE_MODEL_INFO, FaceModelId, MODELS, ModelId, ProcessOptions, TargetHeight, VideoInfo,
+} from '../../../shared/types';
 
 interface Margins {
   top: number;
@@ -21,8 +23,8 @@ export class SettingsPanel {
   readonly info = input.required<VideoInfo>();
   readonly options = input.required<ProcessOptions>();
   readonly disabled = input(false);
-  /** Face models are installed (bin/faces). */
-  readonly facesAvailable = input(false);
+  /** Face restorers whose models are installed (bin/faces). */
+  readonly faceModels = input<FaceModelId[]>([]);
   readonly optionsChange = output<Partial<ProcessOptions>>();
 
   readonly models = MODELS;
@@ -37,7 +39,14 @@ export class SettingsPanel {
 
   readonly geo = computed(() => geometry(this.info(), this.options()));
   readonly model = computed(() => MODELS.find((m) => m.id === this.options().model) ?? MODELS[0]);
+  readonly faceModelInfo = FACE_MODEL_INFO;
+  readonly facesAvailable = computed(() => this.faceModels().length > 0);
   readonly facesUsable = computed(() => this.facesAvailable() && this.options().engine === 'realesrgan');
+  /** The chosen face model, or the first installed one if the chosen one is missing. */
+  readonly faceModel = computed<FaceModelId>(() => {
+    const want = this.options().faceModel;
+    return this.faceModels().includes(want) ? want : (this.faceModels()[0] ?? want);
+  });
   readonly interlaced = computed(() => this.info().interlace === 'tff' || this.info().interlace === 'bff');
 
   readonly margins = computed<Margins>(() => {

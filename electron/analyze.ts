@@ -10,6 +10,7 @@ interface ProbeStream {
   width?: number;
   height?: number;
   sample_aspect_ratio?: string;
+  start_time?: string;
   r_frame_rate?: string;
   avg_frame_rate?: string;
   nb_frames?: string;
@@ -19,7 +20,7 @@ interface ProbeStream {
 
 interface ProbeOut {
   streams: ProbeStream[];
-  format: { format_name?: string; duration?: string; bit_rate?: string };
+  format: { format_name?: string; duration?: string; bit_rate?: string; start_time?: string };
 }
 
 function ratio(text: string | undefined, fallback: number): number {
@@ -44,7 +45,8 @@ export async function analyze(file: string): Promise<VideoInfo> {
   if (!v?.width || !v.height) throw new Error('В файле не найдена видеодорожка.');
   const a = probe.streams.find((s) => s.codec_type === 'audio');
 
-  const fpsRaw = ratio(v.avg_frame_rate, 0) || ratio(v.r_frame_rate, 25);
+  const rateText = ratio(v.avg_frame_rate, 0) ? v.avg_frame_rate! : ratio(v.r_frame_rate, 0) ? v.r_frame_rate! : '25/1';
+  const fpsRaw = ratio(rateText, 25);
   const fps = Math.round(fpsRaw * 1000) / 1000;
   const duration = Number(v.duration) || Number(probe.format.duration) || 0;
   const [sarNum, sarDen] = parseSar(v.sample_aspect_ratio);
@@ -66,7 +68,9 @@ export async function analyze(file: string): Promise<VideoInfo> {
     dar,
     fps,
     fpsText: Number.isInteger(fps) ? `${fps}` : fps.toFixed(3),
+    fpsRational: rateText,
     duration,
+    startTime: Number(v.start_time) || Number(probe.format.start_time) || 0,
     frames: Number(v.nb_frames) || Math.round(duration * fps),
     videoCodec: v.codec_name ?? '?',
     videoBitrateKbps: kbps(v.bit_rate),

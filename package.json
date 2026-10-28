@@ -7,7 +7,8 @@
     "build": "ng build && tsc -p electron/tsconfig.json",
     "start": "npm run build && electron .",
     "dist": "npm run build && electron-builder --win",
-    "typecheck": "tsc -p electron/tsconfig.json --noEmit && tsc -p tsconfig.app.json --noEmit",
+    "typecheck": "tsc -p electron/tsconfig.json --noEmit && tsc -p electron/tsconfig.spec.json && tsc -p tsconfig.app.json --noEmit",
+    "test": "vitest run",
     "ng": "ng"
   },
   "private": true,
@@ -36,6 +37,7 @@
     "electron-builder": "^26.18.0",
     "prettier": "^3.8.1",
     "typescript": "~6.0.2",
+    "vitest": "^4.1.12",
     "wait-on": "^9.5.1"
   },
   "description": "Локальная программа для улучшения VHSRip-видео: деинтерлейс, шумоподавление, цвет, нейросетевой апскейл Real-ESRGAN.",
