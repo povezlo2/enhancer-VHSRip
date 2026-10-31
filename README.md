@@ -109,6 +109,8 @@ src/app/    Angular: store на сигналах, монтаж, настройк
 scripts/    загрузка инструментов, smoke-тест
 ```
 
+Для работы с ИИ-агентами в репозитории лежит скилл Claude Code [ffmpeg-skill](https://github.com/povezlo2/ffmpeg-skill) (`.claude/skills/ffmpeg-skill`): готовые инструменты FFmpeg для нарезки, анализа и проверки видео. В само приложение он не входит. Нужны Python 3.10+ и FFmpeg 6.1+.
+
 Безопасность окна: `contextIsolation`, `sandbox`, без `nodeIntegration`. Видео в интерфейс отдаются через собственный протокол `media://`, и только те файлы, которые выбрали вы или создала программа.
 
 ## Важно

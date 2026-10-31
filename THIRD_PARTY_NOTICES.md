@@ -29,6 +29,10 @@ The Windows build from BtbN is a GPL build. If you redistribute it, for example 
 - include its `LICENSE.txt` (`npm run setup` copies it to `bin/ffmpeg/`);
 - point to the corresponding source code: https://github.com/BtbN/FFmpeg-Builds and https://ffmpeg.org/download.html.
 
+## Claude Code skill: ffmpeg-skill
+
+`.claude/skills/ffmpeg-skill/` is a vendored copy of [ffmpeg-skill](https://github.com/povezlo2/ffmpeg-skill) 3.1.1 (fork of https://github.com/kajisho5/ffmpeg-skill), MIT, license in that folder. It is a development aid for coding agents working in this repository (local FFmpeg editing tools), not part of the app. Installed with `node bin/install.js --project` from the fork, keeping only `docs/contract.md` from `docs/` like the npm package does. To update: run the installer again from a newer checkout and repeat that trim.
+
 ## npm dependencies
 
 Angular, Electron and the other npm packages come with their own licenses (mostly MIT). They are listed in `package-lock.json` and inside `node_modules/*/LICENSE`.
