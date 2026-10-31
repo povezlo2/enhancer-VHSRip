@@ -1,7 +1,9 @@
 import { computed, inject, Injectable, signal } from '@angular/core';
+import { createHistory, type History, record, redo, undo } from '../../shared/history';
+import { initialMontage, type MontageClip } from '../../shared/montage';
 import { coversRange, type Segment, segmentsFromCuts } from '../../shared/segments';
 import {
-  CacheInfo, DEFAULT_OPTIONS, JobProgress, JobStage, ModelId, PreviewResult, ProcessOptions, SegmentState, ToolsStatus,
+  CacheInfo, DEFAULT_OPTIONS, MontageProgress, JobProgress, JobStage, ModelId, PreviewResult, ProcessOptions, SegmentState, ToolsStatus,
   VideoInfo,
 } from '../../shared/types';
 import { EnhancerApiService } from './enhancer-api';
@@ -22,6 +24,8 @@ export interface Clip {
   proxy?: string;
   proxyError?: string;
   detecting?: boolean;
+  /** Set when this clip is the result of a montage: name of the source it was cut from. */
+  montageOf?: string;
   jobId?: string;
   stage?: JobStage;
   percent: number;
@@ -31,6 +35,19 @@ export interface Clip {
   faces?: number;
   output?: string;
   error?: string;
+}
+
+/** Montage editor state of one clip: cut list with undo/redo, thumbnails, render status. */
+export interface MontageState {
+  history: History<MontageClip[]>;
+  thumbs?: { interval: number; urls: string[] };
+  thumbsError?: string;
+  rendering: boolean;
+  progress?: MontageProgress;
+  error?: string;
+  /** Queue entry created from the last render. */
+  resultId?: string;
+  resultName?: string;
 }
 
 export interface PreviewState {
@@ -72,6 +89,9 @@ export class Store {
   readonly defaults = signal<ProcessOptions>(this.initial.options);
   readonly preview = signal<PreviewState>({ running: false, percent: 0, label: '' });
   readonly cache = signal<CacheInfo | null>(null);
+  readonly montages = signal<Record<string, MontageState>>({});
+  /** Clip whose montage is being rendered (one at a time). */
+  private renderingId: string | null = null;
 
   readonly selected = computed(() => this.clips().find((c) => c.id === this.selectedId()) ?? null);
   readonly busy = computed(() => this.clips().some((c) => isActive(c.stage)));
@@ -89,6 +109,10 @@ export class Store {
     void this.refreshTools();
     void this.refreshCache();
     this.api.onProgress((p) => this.applyProgress(p));
+    this.api.onMontageProgress((p) => {
+      const id = this.renderingId;
+      if (id) this.patchMontage(id, { progress: p });
+    });
     this.api.onPreviewProgress((p) =>
       this.preview.update((s) => (s.running ? { ...s, percent: p.percent, label: p.message ?? s.label } : s)));
   }
@@ -105,7 +129,8 @@ export class Store {
     this.addPaths([...files].map((f) => this.api.pathForFile(f)).filter(Boolean));
   }
 
-  addPaths(paths: string[]) {
+  addPaths(paths: string[]): string[] {
+    const added: string[] = [];
     for (const path of paths) {
       if (this.clips().some((c) => c.path === path && !isFinished(c.stage))) continue;
       const clip: Clip = {
@@ -114,8 +139,10 @@ export class Store {
       };
       this.clips.update((list) => [...list, clip]);
       if (!this.selectedId()) this.selectedId.set(clip.id);
+      added.push(clip.id);
       void this.analyze(clip.id);
     }
+    return added;
   }
 
   private async analyze(id: string) {
@@ -138,6 +165,9 @@ export class Store {
     const clip = this.clips().find((c) => c.id === id);
     if (clip?.jobId && isActive(clip.stage)) void this.api.cancel(clip.jobId);
     this.clips.update((list) => list.filter((c) => c.id !== id));
+    if (this.montages()[id]) {
+      this.montages.update(({ [id]: _removed, ...rest }) => rest);
+    }
     if (this.selectedId() === id) this.selectedId.set(this.clips()[0]?.id ?? null);
   }
 
@@ -185,6 +215,77 @@ export class Store {
     } catch (err) {
       this.patch(id, { proxyError: messageOf(err) });
     }
+  }
+
+  // --- Montage ------------------------------------------------------------------------
+
+  /** Montage state of a clip, created on first use (the whole video as one clip). */
+  montage(id: string): MontageState | null {
+    const existing = this.montages()[id];
+    if (existing) return existing;
+    const clip = this.clips().find((c) => c.id === id);
+    if (!clip?.info) return null;
+    const state: MontageState = { history: createHistory(initialMontage(clip.info.frames)), rendering: false };
+    this.montages.update((m) => ({ ...m, [id]: state }));
+    return state;
+  }
+
+  /** Apply an edit (undoable, 5 steps). */
+  editMontage(id: string, clips: MontageClip[]) {
+    const m = this.montage(id);
+    if (m) this.patchMontage(id, { history: record(m.history, clips), error: undefined });
+  }
+
+  undoMontage(id: string) {
+    const m = this.montage(id);
+    if (m) this.patchMontage(id, { history: undo(m.history) });
+  }
+
+  redoMontage(id: string) {
+    const m = this.montage(id);
+    if (m) this.patchMontage(id, { history: redo(m.history) });
+  }
+
+  async loadThumbnails(id: string) {
+    const clip = this.clips().find((c) => c.id === id);
+    const m = this.montage(id);
+    if (!clip || !m || m.thumbs || m.thumbsError === '') return;
+    this.patchMontage(id, { thumbsError: '' }); // '' = loading
+    try {
+      const t = await this.api.thumbnails(clip.path);
+      this.patchMontage(id, { thumbs: { interval: t.interval, urls: t.files.map((f) => this.api.mediaUrl(f)) }, thumbsError: undefined });
+    } catch (err) {
+      this.patchMontage(id, { thumbsError: messageOf(err) });
+    }
+  }
+
+  /** Render the cut list to a new file and add it to the list below the others. */
+  async renderMontage(id: string) {
+    const clip = this.clips().find((c) => c.id === id);
+    const m = this.montage(id);
+    if (!clip || !m || m.rendering || this.renderingId) return;
+    this.renderingId = id;
+    this.patchMontage(id, { rendering: true, error: undefined, progress: { percent: 0 }, resultId: undefined, resultName: undefined });
+    try {
+      const output = await this.api.renderMontage({ path: clip.path, clips: m.history.present, outDir: this.outDir() });
+      const [newId] = this.addPaths([output]);
+      if (newId) this.patch(newId, { montageOf: clip.name });
+      this.patchMontage(id, { rendering: false, resultId: newId, resultName: output.split(/[\\/]/).pop() });
+      void this.refreshCache();
+    } catch (err) {
+      const msg = messageOf(err);
+      this.patchMontage(id, { rendering: false, progress: undefined, error: /cancel/i.test(msg) ? undefined : msg });
+    } finally {
+      this.renderingId = null;
+    }
+  }
+
+  cancelMontage() {
+    void this.api.cancelMontage();
+  }
+
+  private patchMontage(id: string, patch: Partial<MontageState>) {
+    this.montages.update((all) => (all[id] ? { ...all, [id]: { ...all[id], ...patch } } : all));
   }
 
   async refreshCache() {

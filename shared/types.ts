@@ -1,5 +1,6 @@
 // Types shared between the Electron main process and the Angular renderer.
 
+import type { MontageClip } from './montage';
 import type { Segment } from './segments';
 
 export type InterlaceKind = 'progressive' | 'tff' | 'bff' | 'unknown';
@@ -187,6 +188,27 @@ export interface SceneRequest {
   threshold: number;
 }
 
+export interface Thumbnails {
+  /** Seconds between thumbnails: file k shows the picture at k * interval. */
+  interval: number;
+  files: string[];
+}
+
+export interface MontageRequest {
+  path: string;
+  clips: MontageClip[];
+  /** Folder for the result; null = next to the source. */
+  outDir: string | null;
+}
+
+export interface MontageProgress {
+  percent: number;
+  framesDone?: number;
+  framesTotal?: number;
+  etaSec?: number;
+  output?: string;
+}
+
 export interface CacheInfo {
   dir: string;
   bytes: number;
@@ -220,6 +242,12 @@ export interface EnhancerApi {
   detectScenes(req: SceneRequest): Promise<number[]>;
   /** Small H.264 copy of the source that the browser can play (AVI/XviD often cannot). */
   proxy(path: string): Promise<string>;
+  /** Timeline thumbnails for the montage editor. */
+  thumbnails(path: string): Promise<Thumbnails>;
+  /** Cut and join clips into a lossless MKV; resolves with its path. */
+  renderMontage(req: MontageRequest): Promise<string>;
+  cancelMontage(): Promise<void>;
+  onMontageProgress(cb: (p: MontageProgress) => void): () => void;
   cacheInfo(): Promise<CacheInfo>;
   clearCache(): Promise<CacheInfo>;
   mediaUrl(path: string): string;

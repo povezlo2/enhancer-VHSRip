@@ -1,6 +1,8 @@
 import { Injectable } from '@angular/core';
 import { fixedSegments } from '../../shared/segments';
-import type { CacheInfo, EnhancerApi, JobProgress, PreviewResult, SegmentState, ToolsStatus, VideoInfo } from '../../shared/types';
+import type {
+  CacheInfo, EnhancerApi, JobProgress, MontageProgress, PreviewResult, SegmentState, ToolsStatus, VideoInfo,
+} from '../../shared/types';
 
 declare global {
   interface Window {
@@ -18,6 +20,7 @@ export class EnhancerApiService {
 function createMock(): EnhancerApi {
   const progress = new Set<(p: JobProgress) => void>();
   const previewProgress = new Set<(p: JobProgress) => void>();
+  const montageProgress = new Set<(p: MontageProgress) => void>();
   const sub = (set: Set<(p: JobProgress) => void>, cb: (p: JobProgress) => void) => {
     set.add(cb);
     return () => set.delete(cb);
@@ -87,6 +90,19 @@ function createMock(): EnhancerApi {
       return [96, 151, 301, 390];
     },
     proxy: async () => '',
+    thumbnails: async () => ({ interval: 1, files: [] }),
+    renderMontage: async (req) => {
+      for (let i = 0; i <= 100; i += 25) {
+        montageProgress.forEach((cb) => cb({ percent: i }));
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return req.path.replace(/(\.[^.]+)?$/, '_montage.mkv');
+    },
+    cancelMontage: async () => undefined,
+    onMontageProgress: (cb) => {
+      montageProgress.add(cb);
+      return () => montageProgress.delete(cb);
+    },
     cacheInfo: async (): Promise<CacheInfo> => ({ dir: '(mock)', bytes: 0, files: 0 }),
     clearCache: async (): Promise<CacheInfo> => ({ dir: '(mock)', bytes: 0, files: 0 }),
     cancel: async () => undefined,

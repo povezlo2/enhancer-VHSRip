@@ -4,9 +4,13 @@ import { geometry } from '../../shared/geometry';
 import type { Segment } from '../../shared/segments';
 import type { ProcessOptions } from '../../shared/types';
 import { formatDuration, PreviewCompare, PreviewRun } from './preview-compare/preview-compare';
+import type { MontageClip } from '../../shared/montage';
+import { MontageEditor } from './montage-editor/montage-editor';
 import { SegmentEditor, type SegmentPreview } from './segment-editor/segment-editor';
 import { SettingsPanel } from './settings-panel/settings-panel';
 import { Clip, isActive, Store } from './store';
+
+type Tab = 'montage' | 'settings' | 'segments' | 'preview';
 
 const STAGE_LABEL: Record<string, string> = {
   queued: 'В очереди',
@@ -22,7 +26,7 @@ const STAGE_LABEL: Record<string, string> = {
 
 @Component({
   selector: 'app-root',
-  imports: [SettingsPanel, PreviewCompare, SegmentEditor, LowerCasePipe],
+  imports: [SettingsPanel, PreviewCompare, SegmentEditor, MontageEditor, LowerCasePipe],
   templateUrl: './app.html',
   styleUrl: './app.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -35,7 +39,7 @@ const STAGE_LABEL: Record<string, string> = {
 export class App {
   protected readonly store = inject(Store);
   protected readonly dragging = signal(false);
-  protected readonly tab = signal<'settings' | 'segments' | 'preview'>('settings');
+  protected readonly tab = signal<Tab>('settings');
   protected readonly mediaUrl = (p: string) => this.store.api.mediaUrl(p);
 
   protected readonly selected = this.store.selected;
@@ -51,10 +55,26 @@ export class App {
 
   protected isActive = isActive;
 
-  protected openTab(tab: 'settings' | 'segments' | 'preview') {
+  protected openTab(tab: Tab) {
     this.tab.set(tab);
     const c = this.selected();
-    if (tab === 'segments' && c) void this.store.loadProxy(c.id);
+    if (!c) return;
+    if (tab === 'segments' || tab === 'montage') void this.store.loadProxy(c.id);
+    if (tab === 'montage') {
+      this.store.montage(c.id);
+      void this.store.loadThumbnails(c.id);
+    }
+  }
+
+  protected selectClip(id: string) {
+    this.store.select(id);
+    // Prepare what the open tab needs for the newly selected clip.
+    if (this.tab() === 'segments' || this.tab() === 'montage') this.openTab(this.tab());
+  }
+
+  protected editMontage(clips: MontageClip[]) {
+    const c = this.selected();
+    if (c) this.store.editMontage(c.id, clips);
   }
 
   protected setSegments(segments: Segment[] | null) {

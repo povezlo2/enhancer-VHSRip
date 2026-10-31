@@ -56,9 +56,12 @@
       <ul class="clips">
         @for (c of store.clips(); track c.id) {
           <li>
-            <button type="button" class="clip" [class.on]="c.id === store.selectedId()" (click)="store.select(c.id)"
+            <button type="button" class="clip" [class.on]="c.id === store.selectedId()" (click)="selectClip(c.id)"
                     [class.done]="c.stage === 'done'" [class.err]="c.stage === 'error' || (c.error && !c.stage)">
               <span class="clip-name" [title]="c.path">{{ c.name }}</span>
+              @if (c.montageOf) {
+                <span class="clip-badge" [title]="'Смонтировано из ' + c.montageOf">✂ монтаж из {{ c.montageOf }}</span>
+              }
               @if (c.info) {
                 <span class="clip-meta">
                   {{ c.info.width }}×{{ c.info.height }} · {{ c.info.fpsText }} fps · {{ formatDuration(c.info.duration) }}
@@ -136,6 +139,7 @@
 
       @if (c.info; as info) {
         <nav class="tabs">
+          <button type="button" [class.on]="tab() === 'montage'" (click)="openTab('montage')">Монтаж</button>
           <button type="button" [class.on]="tab() === 'settings'" (click)="openTab('settings')">Настройки</button>
           <button type="button" [class.on]="tab() === 'segments'" (click)="openTab('segments')">
             Фрагменты@if (c.segments) { ({{ c.segments.length }}) }
@@ -149,7 +153,14 @@
         </nav>
 
         <div class="tab-body">
-          @if (tab() === 'settings') {
+          @if (tab() === 'montage') {
+            @if (store.montages()[c.id]; as m) {
+              <app-montage-editor [info]="info" [state]="m" [proxySrc]="c.proxy ?? null" [proxyError]="c.proxyError || null"
+                                  (edit)="editMontage($event)" (undo)="store.undoMontage(c.id)" (redo)="store.redoMontage(c.id)"
+                                  (render)="store.renderMontage(c.id)" (cancelRender)="store.cancelMontage()"
+                                  (openResult)="selectClip($event)" />
+            }
+          } @else if (tab() === 'settings') {
             <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()"
                                 [faceModels]="store.tools()?.faceModels ?? []"
                                 (optionsChange)="updateSelected($event)" />
