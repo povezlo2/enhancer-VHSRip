@@ -11,6 +11,9 @@ interface ProbeStream {
   height?: number;
   sample_aspect_ratio?: string;
   start_time?: string;
+  pix_fmt?: string;
+  sample_rate?: string;
+  channels?: number;
   r_frame_rate?: string;
   avg_frame_rate?: string;
   nb_frames?: string;
@@ -73,9 +76,12 @@ export async function analyze(file: string): Promise<VideoInfo> {
     startTime: Number(v.start_time) || Number(probe.format.start_time) || 0,
     frames: Number(v.nb_frames) || Math.round(duration * fps),
     videoCodec: v.codec_name ?? '?',
+    pixFmt: v.pix_fmt ?? 'yuv420p',
     videoBitrateKbps: kbps(v.bit_rate),
     audioCodec: a?.codec_name,
     audioBitrateKbps: kbps(a?.bit_rate),
+    audioSampleRate: Number(a?.sample_rate) || undefined,
+    audioChannels: a?.channels || undefined,
     interlace: interlace.kind,
     interlaceRatio: interlace.ratio,
     suggestedCrop: crop,

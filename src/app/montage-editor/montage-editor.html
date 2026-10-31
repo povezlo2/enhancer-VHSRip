@@ -1,29 +1,54 @@
+@if (state().restored) {
+  <div class="notice">
+    <span>Монтаж восстановлен из прошлого запуска (сохранён {{ savedLabel() }}).</span>
+    <button type="button" class="link small" (click)="restart.emit()" [disabled]="busy()">Начать заново</button>
+  </div>
+}
+
 <div class="player">
-  @if (proxySrc(); as src) {
-    <video #video [src]="src" preload="auto" (play)="onPlay()" (pause)="onPause()" (click)="togglePlay()"></video>
-  } @else if (proxyError()) {
-    <p class="error">{{ proxyError() }}</p>
-  } @else {
+  @for (s of usedSources(); track s.path) {
+    @if (s.proxy) {
+      <video #video [attr.data-src]="s.path" [src]="s.proxy" preload="auto" [class.active]="s.path === activeSource()"
+             (play)="onPlay()" (pause)="onPause($event)" (click)="togglePlay()"></video>
+    }
+  }
+  @if (!anyProxy()) {
     <div class="placeholder">Готовлю видео для просмотра…</div>
+  }
+  @if (overlay(); as o) {
+    <div class="fade" [style.opacity]="o.black"></div>
+    <span class="badge">переход: {{ o.label }}</span>
   }
 </div>
 
 <div class="transport">
   <div class="group">
-    <button type="button" class="icon" (click)="undo.emit()" [disabled]="!canUndo() || rendering()"
+    <button type="button" class="icon" (click)="undo.emit()" [disabled]="!canUndo() || busy()"
             [title]="'Отменить (Ctrl+Z), доступно: ' + canUndo()">↶<small>{{ canUndo() || '' }}</small></button>
-    <button type="button" class="icon" (click)="redo.emit()" [disabled]="!canRedo() || rendering()"
+    <button type="button" class="icon" (click)="redo.emit()" [disabled]="!canRedo() || busy()"
             [title]="'Повторить (Ctrl+Y), доступно: ' + canRedo()">↷<small>{{ canRedo() || '' }}</small></button>
     <span class="sep"></span>
-    <button type="button" class="icon" (click)="split()" [disabled]="!canSplit() || rendering()" title="Разрезать по бегунку (S)">✂</button>
-    <button type="button" class="icon" (click)="remove()" [disabled]="!selected() || rendering()" title="Удалить клип (Delete)">🗑</button>
+    <button type="button" class="icon" (click)="split()" [disabled]="!canSplit() || busy()" title="Разрезать по бегунку (S)">✂</button>
+    <button type="button" class="icon" (click)="remove()" [disabled]="!selected() || busy()" title="Удалить клип (Delete)">🗑</button>
+    <div class="menu-wrap">
+      <button type="button" class="btn small ghost" (click)="addMenu.set(!addMenu())" [disabled]="busy()"
+              title="Добавить видео после выбранного клипа (или в конец)">{{ state().adding ? 'Добавляю…' : '+ Видео' }}</button>
+      @if (addMenu()) {
+        <div class="menu" role="menu">
+          @for (q of queue(); track q.path) {
+            <button type="button" role="menuitem" (click)="addVideos([q.path])">{{ q.name }}</button>
+          }
+          <button type="button" role="menuitem" class="file" (click)="addVideos('pick')">Файл с диска…</button>
+        </div>
+      }
+    </div>
   </div>
 
   <div class="group center">
     <button type="button" class="icon" (click)="seek(0)" title="В начало (Home)">⏮</button>
     <button type="button" class="icon" (click)="jumpSeconds(-5)" title="Назад на 5 с">↺5</button>
     <button type="button" class="icon" (click)="step(-1)" title="Кадр назад (←)">‹</button>
-    <button type="button" class="play" (click)="togglePlay()" [disabled]="!proxySrc() || !total()"
+    <button type="button" class="play" (click)="togglePlay()" [disabled]="!anyProxy() || !total()"
             [attr.aria-label]="playing() ? 'Пауза' : 'Играть'">{{ playing() ? '❚❚' : '▶' }}</button>
     <button type="button" class="icon" (click)="step(1)" title="Кадр вперёд (→)">›</button>
     <button type="button" class="icon" (click)="jumpSeconds(5)" title="Вперёд на 5 с">↻5</button>
@@ -46,16 +71,25 @@
     </div>
     <div class="track" (pointerdown)="scrubStart($event)">
       @for (v of views(); track v.clip.id) {
-        <div class="clip" [class.on]="v.clip.id === selectedId()" [style.left.px]="v.left" [style.width.px]="v.width"
-             (pointerdown)="clickClip(v, $event)" [title]="time(v.clip.end - v.clip.start) + ' · кадры ' + v.clip.start + '–' + (v.clip.end - 1)">
+        <div class="clip" [class.on]="v.clip.id === selectedId()" [class.missing]="v.missing"
+             [style.left.px]="v.left" [style.width.px]="v.width" [style.--hue]="v.hue" [style.z-index]="v.index + 1"
+             (pointerdown)="clickClip(v, $event)" [title]="v.label + ' · ' + time(v.clip.end - v.clip.start) + ' · кадры ' + v.clip.start + '–' + (v.clip.end - 1)">
           @for (t of v.tiles; track t.x) {
             <img [src]="t.url" [style.left.px]="t.x" alt="" draggable="false" />
+          }
+          @if (multiSource()) {
+            <span class="src">{{ v.label }}</span>
           }
           @if (v.clip.id === selectedId()) {
             <span class="handle left" (pointerdown)="trimStart(v, 'start', $event)" title="Потяните, чтобы обрезать начало"></span>
             <span class="handle right" (pointerdown)="trimStart(v, 'end', $event)" title="Потяните, чтобы обрезать конец"></span>
           }
         </div>
+      }
+      @for (j of joins(); track j.index) {
+        <button type="button" class="join" [class.set]="!!j.transition" [class.on]="j.index === selectedJoin()"
+                [style.left.px]="j.x" (pointerdown)="$event.stopPropagation()" (click)="clickJoin(j, $event)"
+                [title]="j.transition ? 'Переход: ' + j.transition.kind : 'Добавить переход'">{{ j.transition ? '⧉' : '+' }}</button>
       }
       @if (!views().length) {
         <span class="empty">Все клипы удалены. Отмените действие (Ctrl+Z).</span>
@@ -65,23 +99,55 @@
   </div>
 </div>
 
+@if (join(); as j) {
+  <div class="panel">
+    <strong>Переход между клипами {{ j.index }} и {{ j.index + 1 }}</strong>
+    <div class="seg">
+      <button type="button" [class.on]="!j.kind" (click)="setJoin(null)">Без перехода</button>
+      @for (t of transitions; track t.kind) {
+        <button type="button" [class.on]="j.kind === t.kind" (click)="setJoin(t.kind)">{{ t.title }}</button>
+      }
+    </div>
+    @if (j.kind) {
+      <label class="field">
+        <span>Длительность</span>
+        <select (change)="setJoin(j.kind, +$any($event.target).value)">
+          @for (s of transitionSeconds; track s) {
+            <option [value]="s" [selected]="s === closestSeconds(j.seconds)">{{ s }} с</option>
+          }
+        </select>
+      </label>
+      @if (j.used < j.clip.transitionIn!.frames) {
+        <span class="warn">Клипы короткие: переход сокращён до {{ (j.used / fps()).toFixed(2) }} с.</span>
+      }
+    }
+    <button type="button" class="link small" (click)="setAllJoins()">Применить ко всем стыкам</button>
+  </div>
+}
+
 <div class="tools">
   @if (selected(); as s) {
-    <span class="info">Клип {{ selectedIndex() + 1 }} из {{ clips().length }} · {{ time(s.end - s.start) }}</span>
-    <button type="button" class="btn small ghost" (click)="move(-1)" [disabled]="selectedIndex() === 0 || rendering()">← Сдвинуть</button>
-    <button type="button" class="btn small ghost" (click)="move(1)" [disabled]="selectedIndex() >= clips().length - 1 || rendering()">Сдвинуть →</button>
+    <span class="info">Клип {{ selectedIndex() + 1 }} из {{ clips().length }} · {{ time(lay().lengths[selectedIndex()]) }}</span>
+    <button type="button" class="btn small ghost" (click)="move(-1)" [disabled]="selectedIndex() === 0 || busy()">← Сдвинуть</button>
+    <button type="button" class="btn small ghost" (click)="move(1)" [disabled]="selectedIndex() >= clips().length - 1 || busy()">Сдвинуть →</button>
   } @else {
-    <span class="info">{{ clips().length }} {{ clips().length === 1 ? 'клип' : 'клипов' }}. Нажмите на клип, чтобы выбрать его.</span>
+    <span class="info">{{ clips().length }} {{ clips().length === 1 ? 'клип' : 'клипов' }}. Нажмите на клип, чтобы выбрать его, или на ＋ между клипами, чтобы добавить переход.</span>
   }
-  <button type="button" class="btn small ghost" (click)="trimAtPlayhead('start')" [disabled]="!total() || rendering()"
+  <button type="button" class="btn small ghost" (click)="trimAtPlayhead('start')" [disabled]="!total() || busy()"
           title="Удалить кадры клипа до бегунка">⇤ Обрезать до бегунка</button>
-  <button type="button" class="btn small ghost" (click)="trimAtPlayhead('end')" [disabled]="!total() || rendering()"
+  <button type="button" class="btn small ghost" (click)="trimAtPlayhead('end')" [disabled]="!total() || busy()"
           title="Удалить кадры клипа после бегунка">Обрезать после бегунка ⇥</button>
 </div>
 <p class="hint">
   S — разрезать, Delete — удалить клип, Ctrl+Z / Ctrl+Y — отменить / повторить (до 5 шагов), ← → — по кадру,
-  Shift+← → — по секунде, пробел — играть. Края выбранного клипа можно тянуть мышью.
+  Shift+← → — по секунде, пробел — играть. Края выбранного клипа можно тянуть мышью. Монтаж сохраняется сам.
+  @if (multiSource() && owner(); as o) {
+    Формат ролика задаёт {{ state().name }} ({{ o.width }}×{{ o.height }}, {{ o.fpsText }} к/с): другие видео приводятся к нему, при другой форме кадра — с полями.
+  }
 </p>
+@if (missing().length) {
+  <p class="error">Нет доступа к файлам: {{ missing().join(', ') }}. Верните их на место или удалите эти клипы.</p>
+}
 
 <div class="render">
   @if (rendering()) {
@@ -90,8 +156,20 @@
     <button type="button" class="btn small" (click)="cancelRender.emit()">Отменить</button>
   } @else {
     <span class="mono">Итог: {{ time(total()) }} · {{ total() }} кадров</span>
+    <div class="seg" title="Формат результата">
+      <button type="button" [class.on]="state().format === 'lossless'" (click)="outputFormat.emit({ format: 'lossless' })"
+              title="FFV1 + FLAC в MKV: без потерь, для дальнейшего улучшения. Файл большой">Без потерь (MKV)</button>
+      <button type="button" [class.on]="state().format === 'mp4'" (click)="outputFormat.emit({ format: 'mp4' })"
+              title="H.264 + AAC: чтобы смотреть и делиться">MP4</button>
+    </div>
+    @if (state().format === 'mp4') {
+      <div class="seg" title="Качество MP4">
+        <button type="button" [class.on]="state().crf <= 18" (click)="outputFormat.emit({ format: 'mp4', crf: 18 })">Высокое</button>
+        <button type="button" [class.on]="state().crf > 18" (click)="outputFormat.emit({ format: 'mp4', crf: 23 })">Компактное</button>
+      </div>
+    }
     <div class="spacer"></div>
-    <button type="button" class="btn primary" (click)="render.emit()" [disabled]="!total()">Смонтировать</button>
+    <button type="button" class="btn primary" (click)="render.emit()" [disabled]="!total() || missing().length > 0">Смонтировать</button>
   }
 </div>
 @if (state().error) {
@@ -99,7 +177,8 @@
 }
 @if (!rendering() && state().resultId; as id) {
   <div class="done">
-    <span>Готово: <code>{{ state().resultName }}</code> добавлен в список слева. Без потерь качества (FFV1 + FLAC), его можно сразу улучшать.</span>
+    <span>Готово: <code>{{ state().resultName }}</code> добавлен в список слева.
+      {{ state().resultName?.endsWith('.mp4') ? 'MP4 (H.264): можно смотреть и делиться.' : 'Без потерь (FFV1 + FLAC): его можно сразу улучшать.' }}</span>
     <button type="button" class="btn small" (click)="openResult.emit(id)">Открыть</button>
   </div>
 }
