@@ -1,5 +1,7 @@
+import type { Segment } from '../shared/segments';
 import type { JobProgress, ProcessOptions } from '../shared/types';
 import { analyze } from './analyze';
+import type { ChunkCache } from './cache';
 import { geometry, processClip, uniqueOutput } from './pipeline';
 import { CancelledError } from './proc';
 
@@ -8,6 +10,7 @@ interface Job {
   path: string;
   options: ProcessOptions;
   outDir: string | null;
+  segments: Segment[] | null;
   controller: AbortController;
 }
 
@@ -17,11 +20,11 @@ export class JobQueue {
   private running = false;
   private seq = 0;
 
-  constructor(private readonly emit: (p: JobProgress) => void) {}
+  constructor(private readonly emit: (p: JobProgress) => void, private readonly cache: ChunkCache | null) {}
 
-  enqueue(path: string, options: ProcessOptions, outDir: string | null): string {
+  enqueue(path: string, options: ProcessOptions, outDir: string | null, segments: Segment[] | null = null): string {
     const id = `j${++this.seq}`;
-    this.jobs.push({ id, path, options, outDir, controller: new AbortController() });
+    this.jobs.push({ id, path, options, outDir, segments, controller: new AbortController() });
     this.emit({ jobId: id, stage: 'queued', percent: 0 });
     void this.pump();
     return id;
@@ -61,7 +64,10 @@ export class JobQueue {
       report({ stage: 'prepare', percent: 0, message: 'Анализ…' });
       const info = await analyze(job.path);
       const output = uniqueOutput(job.path, job.outDir, geometry(info, job.options).outH);
-      await processClip({ info, options: job.options, output, signal: job.controller.signal, report });
+      await processClip({
+        info, options: job.options, output, signal: job.controller.signal, report,
+        segments: job.segments, cache: this.cache,
+      });
     } catch (err) {
       if (err instanceof CancelledError || job.controller.signal.aborted) return;
       this.emit({ jobId: job.id, stage: 'error', percent: 0, message: (err as Error).message });

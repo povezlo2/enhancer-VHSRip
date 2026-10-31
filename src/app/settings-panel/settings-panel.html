@@ -146,7 +146,7 @@
     <label class="row check" [class.off]="!facesUsable()">
       <input type="checkbox" [checked]="options().faceRestore && facesUsable()" [disabled]="!facesUsable()"
              (change)="set('faceRestore', $any($event.target).checked)" />
-      <span>Улучшать лица (GFPGAN 1.4)</span>
+      <span>Улучшать лица</span>
     </label>
 
     @if (!facesAvailable()) {
@@ -155,6 +155,25 @@
       <p class="hint">Работает только с движком «Нейросеть»: лица восстанавливаются на кадрах после апскейла.</p>
     } @else {
       @if (options().faceRestore) {
+        <div class="models">
+          @for (m of faceModelInfo; track m.id) {
+            <button type="button" class="model" [class.on]="faceModel() === m.id" [disabled]="!faceModels().includes(m.id)"
+                    (click)="set('faceModel', m.id)">
+              <strong>{{ m.title }}</strong>
+              <span>{{ faceModels().includes(m.id) ? m.hint : 'Модель не установлена: запустите npm run setup.' }}</span>
+            </button>
+          }
+        </div>
+        @if (faceModel() === 'codeformer') {
+          <label class="row slider">
+            <span class="label">Похожесть</span>
+            <input type="range" min="0" max="1" step="0.05" [value]="options().faceFidelity"
+                   (input)="set('faceFidelity', num($event))" />
+            <span class="value">{{ options().faceFidelity.toFixed(2) }}</span>
+          </label>
+          <p class="hint">Ближе к 1: лицо остаётся «своим», но деталей меньше. Ближе к 0: больше дорисованных деталей, но человек
+            может стать непохожим. Для семейного видео обычно 0.6–0.8.</p>
+        }
         <label class="row slider">
           <span class="label">Сила эффекта</span>
           <input type="range" min="0.1" max="1" step="0.05" [value]="options().faceStrength"
@@ -164,7 +183,8 @@
       }
       <p class="hint">
         Находит лица на каждом кадре и прорисовывает глаза, кожу и черты. На 100% лица могут стать «чужими»
-        и слегка мерцать между кадрами, поэтому для фильмов лучше 40–70%. Крупные планы выигрывают больше всего.
+        и слегка мерцать между кадрами, поэтому для фильмов лучше 40–70%. Крупные планы выигрывают больше всего:
+        на вкладке «Фрагменты» лица можно включить только для нужных сцен.
       </p>
     }
   </section>

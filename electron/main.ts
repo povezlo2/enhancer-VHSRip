@@ -1,11 +1,19 @@
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
-import { mkdirSync, rmSync } from 'node:fs';
+import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from 'electron';
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import type { JobProgress, PreviewRequest, PreviewResult, ProcessOptions } from '../shared/types';
+import type { Segment } from '../shared/segments';
+import type {
+  CacheInfo, JobProgress, MontageProgress, MontageRequest, PreviewRequest, PreviewResult, ProcessOptions, SceneRequest,
+  VideoInfo,
+} from '../shared/types';
 import { analyze } from './analyze';
+import { ChunkCache } from './cache';
+import { serveFile } from './media';
+import { montageOutput, renderMontage, thumbnailsFor } from './montage';
 import { originalPreview, processClip, TMP_ROOT } from './pipeline';
+import { proxyFor } from './proxy';
 import { JobQueue } from './queue';
+import { detectScenes } from './scenes';
 import { tools } from './tools';
 
 const DEV_URL = process.env.ENHANCER_DEV_URL; // set by `npm run dev`
@@ -21,10 +29,15 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'media', privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true } },
 ]);
 
-const queue = new JobQueue((p: JobProgress) => {
-  if (p.output) allow(p.output);
-  win?.webContents.send('job:progress', p);
-});
+// Rendered fragments and editor proxies live in the user profile, so they survive restarts.
+const cacheRoot = () => path.join(app.getPath('userData'), 'cache');
+const proxiesDir = () => path.join(cacheRoot(), 'proxies');
+const thumbsDir = () => path.join(cacheRoot(), 'thumbs');
+let montageController: AbortController | null = null;
+let chunkCache: ChunkCache | null = null;
+const cache = () => (chunkCache ??= new ChunkCache(path.join(cacheRoot(), 'fragments')));
+
+let queue: JobQueue;
 
 let previewController: AbortController | null = null;
 
@@ -55,6 +68,48 @@ function createWindow() {
   else void win.loadFile(path.join(__dirname, '..', '..', 'dist', 'renderer', 'browser', 'index.html'));
 }
 
+/** Analysis results per file version, so the editor's scene search and proxy don't re-run idet/cropdetect. */
+const analyzed = new Map<string, Promise<VideoInfo>>();
+function analyzeCached(file: string): Promise<VideoInfo> {
+  const st = statSync(file);
+  const key = `${path.resolve(file)}|${st.size}|${st.mtimeMs}`;
+  let info = analyzed.get(key);
+  if (!info) {
+    info = analyze(file);
+    info.catch(() => analyzed.delete(key));
+    analyzed.set(key, info);
+  }
+  return info;
+}
+
+/** Total size and file count of everything under `dir`. */
+function dirUsage(dir: string): { bytes: number; files: number } {
+  if (!existsSync(dir)) return { bytes: 0, files: 0 };
+  let bytes = 0;
+  let files = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = dirUsage(p);
+      bytes += sub.bytes;
+      files += sub.files;
+    } else {
+      bytes += statSync(p).size;
+      files++;
+    }
+  }
+  return { bytes, files };
+}
+
+function cacheInfo(): CacheInfo {
+  const parts = [cache().info(), dirUsage(proxiesDir()), dirUsage(thumbsDir())];
+  return {
+    dir: cacheRoot(),
+    files: parts.reduce((n, p) => n + p.files, 0),
+    bytes: parts.reduce((n, p) => n + p.bytes, 0),
+  };
+}
+
 function registerIpc() {
   ipcMain.handle('tools', () => tools(true));
 
@@ -75,11 +130,55 @@ function registerIpc() {
 
   ipcMain.handle('analyze', (_e, file: string) => {
     allow(file); // dropped files arrive here first
-    return analyze(file);
+    return analyzeCached(file);
   });
 
-  ipcMain.handle('job:enqueue', (_e, file: string, options: ProcessOptions, outDir: string | null) =>
-    queue.enqueue(file, options, outDir));
+  ipcMain.handle('job:enqueue', (_e, file: string, options: ProcessOptions, outDir: string | null, segments: Segment[] | null) =>
+    queue.enqueue(file, options, outDir, segments));
+
+  ipcMain.handle('scenes', async (_e, req: SceneRequest) => detectScenes(await analyzeCached(req.path), req.threshold));
+
+  ipcMain.handle('proxy', async (_e, file: string) => {
+    const proxy = await proxyFor(await analyzeCached(file), proxiesDir());
+    allow(proxy);
+    return proxy;
+  });
+
+  ipcMain.handle('thumbnails', async (_e, file: string) => {
+    const thumbs = await thumbnailsFor(await analyzeCached(file), thumbsDir());
+    thumbs.files.forEach(allow);
+    return thumbs;
+  });
+
+  ipcMain.handle('montage:render', async (_e, req: MontageRequest) => {
+    montageController?.abort();
+    const controller = new AbortController();
+    montageController = controller;
+    const info = await analyzeCached(req.path);
+    const output = montageOutput(req.path, req.outDir);
+    const send = (p: MontageProgress) => win?.webContents.send('montage:progress', p);
+    try {
+      await renderMontage(info, req.clips, output, controller.signal, send);
+    } finally {
+      if (montageController === controller) montageController = null;
+    }
+    allow(output);
+    send({ percent: 100, output });
+    return output;
+  });
+
+  ipcMain.handle('montage:cancel', () => {
+    montageController?.abort();
+    montageController = null;
+  });
+
+  ipcMain.handle('cache:info', () => cacheInfo());
+  ipcMain.handle('cache:clear', () => {
+    cache().clear();
+    rmSync(proxiesDir(), { recursive: true, force: true });
+    rmSync(thumbsDir(), { recursive: true, force: true });
+    return cacheInfo();
+  });
 
   ipcMain.handle('job:cancel', (_e, id: string) => queue.cancel(id));
 
@@ -91,7 +190,7 @@ function registerIpc() {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
 
-    const info = await analyze(req.path);
+    const info = await analyzeCached(req.path);
     const base: ProcessOptions = { ...req.options, start: req.start, duration: req.duration, crf: 18 };
     const send = (p: Omit<JobProgress, 'jobId'>, label: string) =>
       win?.webContents.send('preview:progress', { ...p, jobId: 'preview', message: label });
@@ -111,7 +210,7 @@ function registerIpc() {
       const file = path.join(dir, `variant-${i}-${label}.mp4`);
       const started = Date.now();
       await processClip({
-        info, options: o, output: file, signal: controller.signal, fast: true,
+        info, options: o, output: file, signal: controller.signal, fast: true, cache: cache(),
         report: (p) => send(p, `${i + 1}/${runs.length}: ${label}`),
       });
       allow(file);
@@ -134,8 +233,16 @@ void app.whenReady().then(() => {
     const file = new URL(req.url).searchParams.get('p') ?? '';
     const resolved = path.resolve(file);
     if (!allowedMedia.has(resolved)) return new Response('forbidden', { status: 403 });
-    return net.fetch(pathToFileURL(resolved).toString(), { headers: req.headers });
+    try {
+      return serveFile(resolved, req.headers.get('range'));
+    } catch {
+      return new Response('not found', { status: 404 });
+    }
   });
+  queue = new JobQueue((p: JobProgress) => {
+    if (p.output) allow(p.output);
+    win?.webContents.send('job:progress', p);
+  }, cache());
   registerIpc();
   createWindow();
   app.on('activate', () => {
@@ -144,7 +251,8 @@ void app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  queue.cancelAll();
+  queue?.cancelAll();
+  montageController?.abort();
   previewController?.abort();
   if (process.platform !== 'darwin') app.quit();
 });

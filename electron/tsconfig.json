@@ -11,5 +11,6 @@
     "sourceMap": true,
     "types": ["node"]
   },
-  "include": ["./**/*.ts", "../shared/**/*.ts"]
+  "include": ["./**/*.ts", "../shared/**/*.ts"],
+  "exclude": ["./**/*.spec.ts", "../shared/**/*.spec.ts"]
 }

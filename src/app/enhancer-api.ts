@@ -1,5 +1,8 @@
 import { Injectable } from '@angular/core';
-import type { EnhancerApi, JobProgress, PreviewResult, ToolsStatus, VideoInfo } from '../../shared/types';
+import { fixedSegments } from '../../shared/segments';
+import type {
+  CacheInfo, EnhancerApi, JobProgress, MontageProgress, PreviewResult, SegmentState, ToolsStatus, VideoInfo,
+} from '../../shared/types';
 
 declare global {
   interface Window {
@@ -17,6 +20,7 @@ export class EnhancerApiService {
 function createMock(): EnhancerApi {
   const progress = new Set<(p: JobProgress) => void>();
   const previewProgress = new Set<(p: JobProgress) => void>();
+  const montageProgress = new Set<(p: MontageProgress) => void>();
   const sub = (set: Set<(p: JobProgress) => void>, cb: (p: JobProgress) => void) => {
     set.add(cb);
     return () => set.delete(cb);
@@ -34,7 +38,9 @@ function createMock(): EnhancerApi {
     dar: 4 / 3,
     fps: 25,
     fpsText: '25',
+    fpsRational: '25/1',
     duration: 18.4,
+    startTime: 0,
     frames: 460,
     videoCodec: 'mpeg4',
     videoBitrateKbps: 1512,
@@ -48,7 +54,8 @@ function createMock(): EnhancerApi {
   return {
     tools: async (): Promise<ToolsStatus> => ({
       ffmpeg: 'mock', ffprobe: 'mock', realesrgan: 'mock',
-      models: ['realesr-animevideov3', 'realesrgan-x4plus'], faces: '(mock)', binDir: '(mock)',
+      models: ['realesr-animevideov3', 'realesrgan-x4plus'], faces: '(mock)', faceModels: ['codeformer', 'gfpgan'],
+      binDir: '(mock)',
     }),
     openFiles: async () => ['C:/Видео/demo_clip.avi'],
     chooseDir: async () => 'C:/Видео/out',
@@ -57,22 +64,47 @@ function createMock(): EnhancerApi {
       await new Promise((r) => setTimeout(r, 400));
       return info(p);
     },
-    enqueue: async () => {
+    enqueue: async (_path, _options, _outDir, segments) => {
       const jobId = `m${++seq}`;
+      const count = (segments ?? fixedSegments(0, 460, 25)).length;
       let pct = 0;
       const t = setInterval(() => {
         pct += 7;
         const stage = pct < 10 ? 'prepare' : pct < 90 ? 'upscale' : 'encode';
         const done = pct >= 100;
+        const current = Math.min(count - 1, Math.floor((pct / 100) * count));
+        const states: SegmentState[] = Array.from({ length: count }, (_, i) =>
+          done || i < current ? 'done' : i === current ? 'running' : 'pending');
         progress.forEach((cb) => cb({
           jobId, stage: done ? 'done' : stage, percent: Math.min(100, pct),
           framesDone: Math.round((pct / 100) * 460), framesTotal: 460, etaSec: Math.max(0, 30 - pct / 3),
+          segmentIndex: current, segmentCount: count, segments: states,
           output: done ? 'C:/Видео/demo_clip_enhanced_1080p.mp4' : undefined,
         }));
         if (done) clearInterval(t);
       }, 400);
       return jobId;
     },
+    detectScenes: async () => {
+      await new Promise((r) => setTimeout(r, 600));
+      return [96, 151, 301, 390];
+    },
+    proxy: async () => '',
+    thumbnails: async () => ({ interval: 1, files: [] }),
+    renderMontage: async (req) => {
+      for (let i = 0; i <= 100; i += 25) {
+        montageProgress.forEach((cb) => cb({ percent: i }));
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return req.path.replace(/(\.[^.]+)?$/, '_montage.mkv');
+    },
+    cancelMontage: async () => undefined,
+    onMontageProgress: (cb) => {
+      montageProgress.add(cb);
+      return () => montageProgress.delete(cb);
+    },
+    cacheInfo: async (): Promise<CacheInfo> => ({ dir: '(mock)', bytes: 0, files: 0 }),
+    clearCache: async (): Promise<CacheInfo> => ({ dir: '(mock)', bytes: 0, files: 0 }),
     cancel: async () => undefined,
     preview: async (): Promise<PreviewResult> => {
       for (let i = 0; i <= 100; i += 20) {

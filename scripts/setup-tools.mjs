@@ -2,6 +2,7 @@
 // Downloads the external tools into ./bin (not committed to git):
 //   bin/realesrgan/  realesrgan-ncnn-vulkan + models   (BSD-3, xinntao/Real-ESRGAN)
 //   bin/ffmpeg/      ffmpeg + ffprobe on Windows        (GPL build, BtbN/FFmpeg-Builds)
+//   bin/faces/       YuNet detector + CodeFormer + GFPGAN 1.4 (ONNX, optional)
 // On Linux/macOS ffmpeg is taken from the system (apt / brew) if not present in bin/.
 import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -24,15 +25,25 @@ const REALESRGAN_BASE = 'https://github.com/xinntao/Real-ESRGAN/releases/downloa
 const FFMPEG_WIN = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
 
 // Face restoration models (bin/faces). File names must match electron/faces/models.ts.
+// FaceFusion publishes the same ONNX exports on Hugging Face and on GitHub; the second URL
+// is a fallback for networks where one of them is blocked.
+const FACEFUSION_HF = 'https://huggingface.co/facefusion/models-3.0.0/resolve/main/';
+const FACEFUSION_GH = 'https://github.com/facefusion/facefusion-assets/releases/download/models-3.0.0/';
 const FACE_MODELS = [
   {
     file: 'face_detection_yunet_2023mar.onnx', // OpenCV Zoo, MIT
-    url: 'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
+    urls: ['https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx'],
     minBytes: 100_000,
   },
   {
-    file: 'gfpgan_1.4.onnx', // GFPGAN v1.4 (TencentARC, Apache-2.0) exported to ONNX by FaceFusion
-    url: 'https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx',
+    file: 'codeformer.onnx', // CodeFormer (S-Lab License 1.0: non-commercial use only), ONNX export by FaceFusion
+    urls: [FACEFUSION_HF + 'codeformer.onnx', FACEFUSION_GH + 'codeformer.onnx'],
+    minBytes: 100_000_000,
+    note: 'CodeFormer распространяется по лицензии S-Lab 1.0: только для некоммерческого использования.',
+  },
+  {
+    file: 'gfpgan_1.4.onnx', // GFPGAN v1.4 (TencentARC, Apache-2.0), ONNX export by FaceFusion
+    urls: [FACEFUSION_HF + 'gfpgan_1.4.onnx', FACEFUSION_GH + 'gfpgan_1.4.onnx'],
     minBytes: 100_000_000,
   },
 ];
@@ -170,16 +181,25 @@ async function setupFaces() {
       continue;
     }
     const part = `${dest}.part`;
-    try {
-      const size = await download(m.url, part);
-      if (size < m.minBytes) throw new Error(`файл слишком маленький (${size} байт), похоже на ошибку загрузки`);
-      renameSync(part, dest);
-      console.log(`✓ ${m.file}`);
-    } catch (err) {
-      rmSync(part, { force: true });
+    let ok = false;
+    for (const url of m.urls) {
+      try {
+        const size = await download(url, part);
+        if (size < m.minBytes) throw new Error(`файл слишком маленький (${size} байт), похоже на ошибку загрузки`);
+        renameSync(part, dest);
+        console.log(`✓ ${m.file}`);
+        if (m.note) console.log(`  ${m.note}`);
+        ok = true;
+        break;
+      } catch (err) {
+        rmSync(part, { force: true });
+        console.log(`  не получилось: ${err.message}`);
+      }
+    }
+    if (!ok) {
       // Faces are optional: report and keep going so the rest of the app still works.
-      console.log(`! Не удалось скачать ${m.file}: ${err.message}`);
-      console.log(`  Скачайте вручную: ${m.url}`);
+      console.log(`! Не удалось скачать ${m.file}. Скачайте вручную любую из ссылок:`);
+      for (const url of m.urls) console.log(`  ${url}`);
       console.log(`  и положите в ${target}`);
     }
   }

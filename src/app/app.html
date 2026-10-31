@@ -15,6 +15,12 @@
     @if (store.outDir()) {
       <button type="button" class="link small" (click)="store.resetOutDir()">сбросить</button>
     }
+    @if (store.cache(); as cache) {
+      <span class="out-label cache" [title]="'Готовые фрагменты: ' + cache.dir">Кэш {{ formatBytes(cache.bytes) }}</span>
+      @if (cache.bytes) {
+        <button type="button" class="link small" [disabled]="store.busy()" (click)="store.clearCache()">очистить</button>
+      }
+    }
   </div>
 
   <div class="actions">
@@ -50,9 +56,12 @@
       <ul class="clips">
         @for (c of store.clips(); track c.id) {
           <li>
-            <button type="button" class="clip" [class.on]="c.id === store.selectedId()" (click)="store.select(c.id)"
+            <button type="button" class="clip" [class.on]="c.id === store.selectedId()" (click)="selectClip(c.id)"
                     [class.done]="c.stage === 'done'" [class.err]="c.stage === 'error' || (c.error && !c.stage)">
               <span class="clip-name" [title]="c.path">{{ c.name }}</span>
+              @if (c.montageOf) {
+                <span class="clip-badge" [title]="'Смонтировано из ' + c.montageOf">✂ монтаж из {{ c.montageOf }}</span>
+              }
               @if (c.info) {
                 <span class="clip-meta">
                   {{ c.info.width }}×{{ c.info.height }} · {{ c.info.fpsText }} fps · {{ formatDuration(c.info.duration) }}
@@ -63,7 +72,7 @@
                 <span class="dot" [attr.data-stage]="c.stage ?? (c.analyzing ? 'analyzing' : 'idle')"></span>
                 {{ stageLabel(c) }}
                 @if (isActive(c.stage) && c.stage !== 'queued') {
-                  · {{ c.percent.toFixed(0) }}%
+                  · {{ c.percent.toFixed(0) }}%{{ segmentLabel(c) }}
                   @if (c.stage === 'faces' && c.faces !== undefined) { · лиц: {{ c.faces }} }
                   @if (c.etaSec !== undefined) { · ещё {{ formatDuration(c.etaSec) }} }
                 }
@@ -130,8 +139,12 @@
 
       @if (c.info; as info) {
         <nav class="tabs">
-          <button type="button" [class.on]="tab() === 'settings'" (click)="tab.set('settings')">Настройки</button>
-          <button type="button" [class.on]="tab() === 'preview'" (click)="tab.set('preview')">Превью</button>
+          <button type="button" [class.on]="tab() === 'montage'" (click)="openTab('montage')">Монтаж</button>
+          <button type="button" [class.on]="tab() === 'settings'" (click)="openTab('settings')">Настройки</button>
+          <button type="button" [class.on]="tab() === 'segments'" (click)="openTab('segments')">
+            Фрагменты@if (c.segments) { ({{ c.segments.length }}) }
+          </button>
+          <button type="button" [class.on]="tab() === 'preview'" (click)="openTab('preview')">Превью</button>
           <div class="spacer"></div>
           <button type="button" class="link small" (click)="store.saveAsDefaults(c.id)">Запомнить как стандартные</button>
           @if (store.clips().length > 1) {
@@ -140,9 +153,24 @@
         </nav>
 
         <div class="tab-body">
-          @if (tab() === 'settings') {
-            <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()" [facesAvailable]="!!store.tools()?.faces"
+          @if (tab() === 'montage') {
+            @if (store.montages()[c.id]; as m) {
+              <app-montage-editor [info]="info" [state]="m" [proxySrc]="c.proxy ?? null" [proxyError]="c.proxyError || null"
+                                  (edit)="editMontage($event)" (undo)="store.undoMontage(c.id)" (redo)="store.redoMontage(c.id)"
+                                  (render)="store.renderMontage(c.id)" (cancelRender)="store.cancelMontage()"
+                                  (openResult)="selectClip($event)" />
+            }
+          } @else if (tab() === 'settings') {
+            <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()"
+                                [faceModels]="store.tools()?.faceModels ?? []"
                                 (optionsChange)="updateSelected($event)" />
+          } @else if (tab() === 'segments') {
+            <app-segment-editor [info]="info" [segments]="c.segments" [states]="c.segmentStates"
+                                [proxySrc]="c.proxy ?? null" [proxyError]="c.proxyError || null"
+                                [detecting]="!!c.detecting" [disabled]="selectedBusy()"
+                                [facesEnabled]="c.options.faceRestore && c.options.engine === 'realesrgan'"
+                                (segmentsChange)="setSegments($event)" (detect)="detectScenes($event)"
+                                (preview)="previewSegment($event)" />
           } @else {
             <app-preview-compare [info]="info" [state]="store.preview()" [engine]="c.options.engine"
                                  [mediaUrl]="mediaUrl" (run)="runPreview($event)" (cancel)="store.cancelPreview()" />

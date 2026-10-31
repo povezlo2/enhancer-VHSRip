@@ -58,3 +58,7 @@ Thumbs.db
 *.wmv
 *.m4v
 *.vob
+
+# Python bytecode (e.g. from the vendored ffmpeg-skill scripts)
+__pycache__/
+*.pyc

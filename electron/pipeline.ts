@@ -1,10 +1,16 @@
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { even, geometry, type Geometry } from '../shared/geometry';
-import type { JobProgress, ProcessOptions, VideoInfo } from '../shared/types';
-import { runOk } from './proc';
-import { modelsDir, requireTool, tools } from './tools';
+import { coversRange, fixedSegments, type Segment, segmentFrames } from '../shared/segments';
+import type { JobProgress, ProcessOptions, SegmentState, VideoInfo } from '../shared/types';
+import type { ChunkCache } from './cache';
+import { type FragmentSpec, fragmentKey, renderFragment } from './fragment';
+import { CancelledError, runOk } from './proc';
+import { LocalFaceRestore } from './processors/faces';
+import { LocalRealEsrgan } from './processors/realesrgan';
+import type { FrameProcessor } from './processors/types';
+import { requireTool, tools } from './tools';
 
 export { geometry };
 
@@ -40,7 +46,7 @@ export function preFilters(info: VideoInfo, o: ProcessOptions): string[] {
 }
 
 /** Final resize + sharpening applied when encoding. */
-function postFilters(g: Geometry, o: ProcessOptions): string[] {
+export function postFilters(g: Geometry, o: ProcessOptions): string[] {
   const f = [`scale=${g.outW}:${g.outH}:flags=lanczos`];
   const amount = [0, 0.4, 0.8, 1.2][o.sharpen];
   if (amount > 0) f.push(`unsharp=5:5:${amount}:5:5:0`);
@@ -48,35 +54,8 @@ function postFilters(g: Geometry, o: ProcessOptions): string[] {
   return f;
 }
 
-function segmentArgs(o: ProcessOptions): string[] {
-  const a: string[] = [];
-  if (o.start && o.start > 0) a.push('-ss', o.start.toFixed(3));
-  if (o.duration && o.duration > 0) a.push('-t', o.duration.toFixed(3));
-  return a;
-}
-
-function expectedFrames(info: VideoInfo, o: ProcessOptions): number {
-  const len = o.duration && o.duration > 0
-    ? Math.min(o.duration, info.duration - (o.start ?? 0))
-    : info.duration - (o.start ?? 0);
-  return Math.max(1, Math.round(len * info.fps));
-}
-
-function frameProgress(onFrame: (n: number) => void) {
-  let buf = '';
-  return (chunk: string) => {
-    buf = (buf + chunk).slice(-2000);
-    const all = [...buf.matchAll(/frame=\s*(\d+)/g)];
-    const last = all[all.length - 1];
-    if (last) onFrame(Number(last[1]));
-  };
-}
-
 function encodeArgs(o: ProcessOptions, fast: boolean): string[] {
-  return [
-    '-c:v', 'libx264', '-preset', fast ? 'veryfast' : 'slow', '-crf', String(o.crf),
-    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
-  ];
+  return ['-c:v', 'libx264', '-preset', fast ? 'veryfast' : 'slow', '-crf', String(o.crf), '-pix_fmt', 'yuv420p'];
 }
 
 export function uniqueOutput(src: string, outDir: string | null, outH: number): string {
@@ -89,172 +68,182 @@ export function uniqueOutput(src: string, outDir: string | null, outH: number): 
   return candidate;
 }
 
+/** Source frames [start, end) covered by the job (whole file, or the preview segment). */
+export function jobRange(info: VideoInfo, o: ProcessOptions): { start: number; end: number } {
+  const total = Math.max(1, info.frames);
+  const start = Math.min(total - 1, Math.max(0, Math.round((o.start ?? 0) * info.fps)));
+  const end = o.duration && o.duration > 0 ? Math.min(total, start + Math.max(1, Math.round(o.duration * info.fps))) : total;
+  return { start, end };
+}
+
+/** Settings of one fragment: the clip settings plus the fragment's own overrides. */
+export function fragmentOptions(o: ProcessOptions, s: Segment): ProcessOptions {
+  return s.overrides?.faceRestore === undefined ? o : { ...o, faceRestore: s.overrides.faceRestore };
+}
+
+/** Local processors for a fragment, in order. Empty for the fast ffmpeg engine. */
+export function localProcessors(o: ProcessOptions): FrameProcessor[] {
+  if (o.engine !== 'realesrgan') return [];
+  const chain: FrameProcessor[] = [new LocalRealEsrgan(o.model, o.model === 'realesrgan-x4plus' ? 4 : o.scale)];
+  if (o.faceRestore) {
+    const t = tools();
+    if (!t.faces || !t.faceModels.includes(o.faceModel)) {
+      throw new Error(`Не найдена модель лиц ${o.faceModel}. Запустите «npm run setup» в папке проекта.`);
+    }
+    chain.push(new LocalFaceRestore(t.faces, { model: o.faceModel, fidelity: o.faceFidelity, strength: o.faceStrength }));
+  }
+  return chain;
+}
+
 export interface ClipRun {
   info: VideoInfo;
   options: ProcessOptions;
   output: string;
   signal: AbortSignal;
   report: Report;
+  /** Fragments to cut the clip into; null/undefined = equal fragments of up to 10 s. */
+  segments?: Segment[] | null;
+  /** Finished fragments are stored here and reused; null = render everything, keep nothing. */
+  cache: ChunkCache | null;
   /** Faster encoder preset, used for previews. */
   fast?: boolean;
+  /** Attempts per fragment before the job fails (a GPU driver hiccup should not lose the job). */
+  attempts?: number;
 }
 
-/** Full pipeline for one clip: clean-up → upscale → encode with original audio. */
+/**
+ * Full pipeline for one clip: cut into fragments → clean up, upscale and restore faces in
+ * each fragment (reusing cached ones) → join the fragments and add the original audio.
+ */
 export async function processClip(job: ClipRun): Promise<void> {
   const { info, options: o, output, signal, report } = job;
-  const ffmpeg = requireTool('ffmpeg');
   const g = geometry(info, o);
-  const total = expectedFrames(info, o);
-  const pre = preFilters(info, o);
-
-  if (o.engine === 'ffmpeg') {
-    report({ stage: 'encode', percent: 0, framesTotal: total });
-    const started = Date.now();
-    await runOk(ffmpeg, [
-      '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
-      ...segmentArgs(o), '-i', info.path,
-      '-map', '0:v:0', '-map', '0:a:0?',
-      '-vf', [...pre, ...postFilters(g, o)].join(','),
-      ...encodeArgs(o, !!job.fast), output,
-    ], {
-      signal,
-      onStdout: frameProgress((n) => report({
-        stage: 'encode', percent: Math.min(99, (n / total) * 100), framesDone: n, framesTotal: total,
-        etaSec: eta(started, n, total),
-      })),
-    });
-    report({ stage: 'done', percent: 100, output });
-    return;
+  const range = jobRange(info, o);
+  const segments = job.segments?.length ? job.segments : fixedSegments(range.start, range.end, info.fps);
+  if (!coversRange(segments, segments[0].start, segments[segments.length - 1].end)
+      || segments[0].start < range.start || segments[segments.length - 1].end > range.end) {
+    throw new Error('Фрагменты должны идти подряд и не выходить за пределы видео.');
   }
+  const first = segments[0].start;
+  const last = segments[segments.length - 1].end;
+  const total = last - first;
+  const pre = preFilters(info, o);
+  const post = postFilters(g, o);
+  const encode = encodeArgs(o, !!job.fast);
 
-  const realesrgan = requireTool('realesrgan');
+  const states: SegmentState[] = segments.map(() => 'pending');
   const work = path.join(TMP_ROOT, `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  const inDir = path.join(work, 'in');
-  const outDir = path.join(work, 'out');
-  mkdirSync(inDir, { recursive: true });
-  mkdirSync(outDir, { recursive: true });
+  mkdirSync(work, { recursive: true });
+  const files: string[] = [];
+  const started = Date.now();
+  let doneFrames = 0;
+  let workedFrames = 0; // frames actually rendered (not cached), for the ETA
+  let faces = 0;
+
+  // 0..97% fragments (by frames), 97..100% joining.
+  const overall = (fragmentFrames: number) => (97 * (doneFrames + fragmentFrames)) / total;
+  const emit = (p: Omit<JobProgress, 'jobId' | 'segments' | 'segmentCount'>) =>
+    report({ ...p, segments: [...states], segmentCount: segments.length });
 
   try {
-    // 1. Clean-up and extract frames (0..10%).
-    report({ stage: 'prepare', percent: 0, framesTotal: total });
-    await runOk(ffmpeg, [
-      '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
-      ...segmentArgs(o), '-i', info.path, '-an',
-      ...(pre.length ? ['-vf', pre.join(',')] : []),
-      '-fps_mode', 'passthrough', path.join(inDir, '%08d.png'),
-    ], {
-      signal,
-      onStdout: frameProgress((n) => report({
-        stage: 'prepare', percent: Math.min(10, (n / total) * 10), framesDone: n, framesTotal: total,
-      })),
-    });
-    const frames = readdirSync(inDir).length;
-    if (!frames) throw new Error('ffmpeg не извлёк ни одного кадра.');
+    for (const [i, seg] of segments.entries()) {
+      const so = fragmentOptions(o, seg);
+      const spec: FragmentSpec = {
+        info, segment: seg, options: so, geometry: g, pre, post, encode, processors: localProcessors(so),
+      };
+      const len = segmentFrames(seg);
+      const key = fragmentKey(spec);
+      const cached = job.cache?.get(key);
+      if (cached) {
+        states[i] = 'cached';
+        files.push(cached);
+        doneFrames += len;
+        emit({ stage: 'prepare', percent: overall(0), segmentIndex: i, framesDone: doneFrames, framesTotal: total });
+        continue;
+      }
 
-    // Progress bands: with faces, upscale 10..65, faces 65..92, encode 92..100; otherwise upscale 10..90.
-    const facesDir = o.faceRestore ? requireFaces() : null;
-    const upEnd = facesDir ? 65 : 90;
-    const encStart = facesDir ? 92 : 90;
-
-    // 2. Neural upscale. Progress = files written to outDir.
-    const started = Date.now();
-    const scale = o.model === 'realesrgan-x4plus' ? 4 : o.scale;
-    const timer = setInterval(() => {
-      const done = safeCount(outDir);
-      report({
-        stage: 'upscale', percent: 10 + (done / frames) * (upEnd - 10), framesDone: done, framesTotal: frames,
-        etaSec: eta(started, done, frames),
-      });
-    }, 700);
-    try {
-      await runOk(realesrgan, [
-        '-i', inDir, '-o', outDir, '-n', o.model, '-s', String(scale), '-f', 'png',
-        '-m', modelsDir()!,
-      ], { signal });
-    } finally {
-      clearInterval(timer);
-    }
-    rmSync(inDir, { recursive: true, force: true }); // free disk early
-
-    // 3. Optional: restore faces in the upscaled frames (in place), in a separate process.
-    if (facesDir) {
-      report({ stage: 'faces', percent: upEnd, framesDone: 0, framesTotal: frames, faces: 0 });
-      const facesStarted = Date.now();
-      await runOk(process.execPath, [
-        path.join(__dirname, 'faces', 'cli.js'),
-        '--dir', outDir, '--models', facesDir, '--strength', String(o.faceStrength),
-      ], {
-        signal,
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-        onStdout: lineParser((line) => {
-          const m = /^progress (\d+) (\d+) (\d+)/.exec(line);
-          if (!m) return;
-          const [done, all, faces] = m.slice(1).map(Number);
-          report({
-            stage: 'faces', percent: upEnd + (done / all) * (encStart - upEnd), framesDone: done, framesTotal: all,
-            faces, etaSec: eta(facesStarted, done, all),
+      states[i] = 'running';
+      const attempts = Math.max(1, job.attempts ?? 3);
+      let file = '';
+      let fragmentFaces = 0;
+      for (let attempt = 1; ; attempt++) {
+        fragmentFaces = 0;
+        const dir = path.join(work, `f${i}-a${attempt}`);
+        mkdirSync(dir, { recursive: true });
+        file = path.join(work, `fragment-${String(i).padStart(4, '0')}.mp4`);
+        try {
+          await renderFragment(spec, dir, file, signal, ({ stage, fraction, faces: f }) => {
+            const doneHere = Math.round(fraction * len);
+            emit({
+              stage, percent: overall(fraction * len), segmentIndex: i,
+              framesDone: doneFrames + doneHere, framesTotal: total,
+              faces: f === undefined ? undefined : faces + f,
+              // Cached fragments cost nothing, so the ETA only counts rendered frames.
+              etaSec: eta(started, workedFrames + doneHere, workedFrames + total - doneFrames),
+              message: attempt > 1 ? `повтор ${attempt}/${attempts}` : undefined,
+            });
+            if (f !== undefined) fragmentFaces = f;
           });
-        }),
-      });
+          break;
+        } catch (err) {
+          if (err instanceof CancelledError || signal.aborted || attempt >= attempts) {
+            if (!(err instanceof CancelledError)) states[i] = 'error';
+            throw err;
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      faces += fragmentFaces;
+      files.push(job.cache ? job.cache.put(key, file, files) : file);
+      states[i] = 'done';
+      doneFrames += len;
+      workedFrames += len;
     }
 
-    // 4. Resize to target, sharpen, encode with source audio.
-    report({ stage: 'encode', percent: encStart, framesTotal: frames });
-    await runOk(ffmpeg, [
-      '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
-      '-framerate', String(info.fps), '-i', path.join(outDir, '%08d.png'),
-      ...segmentArgs(o), '-i', info.path,
-      '-map', '0:v:0', '-map', '1:a:0?',
-      '-vf', postFilters(g, o).join(','),
-      ...encodeArgs(o, !!job.fast), '-shortest', output,
-    ], {
-      signal,
-      onStdout: frameProgress((n) => report({
-        stage: 'encode', percent: encStart + Math.min(99.9 - encStart, (n / frames) * (100 - encStart)),
-        framesDone: n, framesTotal: frames,
-      })),
-    });
-    report({ stage: 'done', percent: 100, output });
+    emit({ stage: 'assemble', percent: 97, framesDone: total, framesTotal: total, faces });
+    await assemble(info, files, first, total, output, work, signal);
+    report({ stage: 'done', percent: 100, output, segments: [...states], segmentCount: segments.length, faces });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 }
 
-/** Unprocessed segment scaled to the same size, for side-by-side comparison. */
-export async function originalPreview(info: VideoInfo, o: ProcessOptions, output: string, signal: AbortSignal) {
-  const ffmpeg = requireTool('ffmpeg');
-  const g = geometry(info, o);
-  const crop = o.crop ? [`crop=${even(o.crop.w)}:${even(o.crop.h)}:${o.crop.x}:${o.crop.y}`] : [];
-  await runOk(ffmpeg, [
-    '-hide_banner', '-y', ...segmentArgs(o), '-i', info.path,
-    '-map', '0:v:0', '-map', '0:a:0?',
-    '-vf', [...crop, `scale=${g.outW}:${g.outH}:flags=bicubic`, 'format=yuv420p', 'setsar=1'].join(','),
-    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-c:a', 'aac', '-b:a', '128k', output,
+/** Join fragments without re-encoding and add the source audio for the same time span. */
+async function assemble(
+  info: VideoInfo, files: string[], firstFrame: number, frames: number, output: string, work: string, signal: AbortSignal,
+) {
+  const list = path.join(work, 'fragments.txt');
+  writeFileSync(list, files.map((f) => `file '${path.resolve(f).replace(/'/g, "'\\''")}'`).join('\n') + '\n');
+  const audio: string[] = [];
+  if (firstFrame > 0) audio.push('-ss', (firstFrame / info.fps).toFixed(6));
+  audio.push('-t', (frames / info.fps).toFixed(6));
+  await runOk(requireTool('ffmpeg'), [
+    '-hide_banner', '-y', '-nostats',
+    '-f', 'concat', '-safe', '0', '-i', list,
+    ...audio, '-i', info.path,
+    '-map', '0:v:0', '-map', '1:a:0?', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+    '-movflags', '+faststart', output,
   ], { signal });
 }
 
-function requireFaces(): string {
-  const dir = tools().faces;
-  if (!dir) throw new Error('Не найдены модели для лиц. Запустите «npm run setup» в папке проекта.');
-  return dir;
-}
-
-/** Split a stream into lines and call `onLine` for each complete line. */
-function lineParser(onLine: (line: string) => void) {
-  let buf = '';
-  return (chunk: string) => {
-    buf += chunk;
-    const lines = buf.split(/\r?\n/);
-    buf = lines.pop() ?? '';
-    lines.forEach(onLine);
-  };
-}
-
-function safeCount(dir: string): number {
+/** Unprocessed segment scaled to the same size, for side-by-side comparison (same frames as the variants). */
+export async function originalPreview(info: VideoInfo, o: ProcessOptions, output: string, signal: AbortSignal) {
+  const g = geometry(info, o);
+  const crop = o.crop ? [`crop=${even(o.crop.w)}:${even(o.crop.h)}:${o.crop.x}:${o.crop.y}`] : [];
+  const range = jobRange(info, o);
+  const work = path.join(TMP_ROOT, `original-${Date.now()}`);
+  mkdirSync(work, { recursive: true });
   try {
-    return readdirSync(dir).length;
-  } catch {
-    return 0;
+    const fragment = path.join(work, 'original.mp4');
+    await renderFragment({
+      info, segment: range, options: o, geometry: g, pre: crop, processors: [],
+      post: [`scale=${g.outW}:${g.outH}:flags=bicubic`, 'format=yuv420p', 'setsar=1'],
+      encode: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p'],
+    }, work, fragment, signal, () => undefined);
+    await assemble(info, [fragment], range.start, range.end - range.start, output, work, signal);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
   }
 }
 

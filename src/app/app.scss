@@ -216,6 +216,15 @@
   text-overflow: ellipsis;
 }
 
+.clip-badge {
+  width: fit-content;
+  padding: 0 6px;
+  border-radius: 3px;
+  background: rgba(139, 92, 246, 0.18);
+  color: #c4b5fd;
+  font-size: 11px;
+}
+
 .clip-meta,
 .clip-target {
   color: var(--text-faint);
