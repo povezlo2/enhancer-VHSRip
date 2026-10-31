@@ -154,11 +154,13 @@ function registerIpc() {
     montageController?.abort();
     const controller = new AbortController();
     montageController = controller;
-    const info = await analyzeCached(req.path);
-    const output = montageOutput(req.path, req.outDir);
+    const target = await analyzeCached(req.owner);
+    const sources = new Map<string, VideoInfo>();
+    for (const p of new Set(req.clips.map((c) => c.source))) sources.set(p, await analyzeCached(p));
+    const output = montageOutput(req.owner, req.outDir, req.format);
     const send = (p: MontageProgress) => win?.webContents.send('montage:progress', p);
     try {
-      await renderMontage(info, req.clips, output, controller.signal, send);
+      await renderMontage(target, sources, req.clips, output, { format: req.format, crf: req.crf }, controller.signal, send);
     } finally {
       if (montageController === controller) montageController = null;
     }

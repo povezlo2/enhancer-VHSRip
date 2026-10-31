@@ -442,6 +442,50 @@
   }
 }
 
+.recent {
+  margin-top: 28px;
+
+  h3 {
+    margin: 0 0 8px;
+    color: var(--text);
+    font-size: 13px;
+  }
+
+  ul {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+}
+
+.recent-open {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  text-align: left;
+
+  &:hover {
+    border-color: var(--line-strong);
+  }
+
+  span {
+    color: var(--text-faint);
+    font: 12px var(--mono);
+  }
+}
+
 .drag-overlay {
   position: fixed;
   inset: 0;

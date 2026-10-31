@@ -154,10 +154,12 @@
 
         <div class="tab-body">
           @if (tab() === 'montage') {
-            @if (store.montages()[c.id]; as m) {
-              <app-montage-editor [info]="info" [state]="m" [proxySrc]="c.proxy ?? null" [proxyError]="c.proxyError || null"
-                                  (edit)="editMontage($event)" (undo)="store.undoMontage(c.id)" (redo)="store.redoMontage(c.id)"
-                                  (render)="store.renderMontage(c.id)" (cancelRender)="store.cancelMontage()"
+            @if (montage.states()[c.path]; as m) {
+              <app-montage-editor [state]="m" [sources]="montage.sources()" [queue]="queueEntries()"
+                                  (edit)="editMontage($event)" (undo)="montage.undo(c.path)" (redo)="montage.redo(c.path)"
+                                  (add)="addToMontage($event)" (restart)="montage.restart(c.path)"
+                                  (outputFormat)="montage.setOutput(c.path, $event.format, $event.crf)"
+                                  (render)="montage.render(c.path)" (cancelRender)="montage.cancelRender()"
                                   (openResult)="selectClip($event)" />
             }
           } @else if (tab() === 'settings') {
@@ -185,6 +187,22 @@
           <li>Проверьте настройки и сделайте превью на 3 секундах.</li>
           <li>Запустите обработку: результат сохранится в MP4 рядом с исходником.</li>
         </ol>
+        @if (montage.recent().length) {
+          <div class="recent">
+            <h3>Продолжить монтаж</h3>
+            <ul>
+              @for (m of montage.recent(); track m.owner) {
+                <li>
+                  <button type="button" class="recent-open" (click)="continueMontage(m.owner)" [title]="m.owner">
+                    <strong>{{ m.name }}</strong>
+                    <span>{{ m.history.present.length }} {{ m.history.present.length === 1 ? 'клип' : 'клипов' }} · {{ formatDuration(montage.seconds(m)) }}</span>
+                  </button>
+                  <button type="button" class="link small" (click)="montage.forget(m.owner)" title="Удалить сохранённый монтаж">удалить</button>
+                </li>
+              }
+            </ul>
+          </div>
+        }
       </div>
     }
   </section>

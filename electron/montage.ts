@@ -1,81 +1,202 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { clipFrames, type MontageClip, montageFrames, validMontage } from '../shared/montage';
-import type { MontageProgress, Thumbnails, VideoInfo } from '../shared/types';
+import { layout, type MontageClip, montageFrames, validMontage } from '../shared/montage';
+import type { MontageFormat, MontageProgress, Thumbnails, VideoInfo } from '../shared/types';
 import { frameCounter } from './fragment';
 import { runOk } from './proc';
 import { requireTool } from './tools';
 
 /** Seconds decoded before a clip's first frame, so the keyframe seek always lands early. */
 const SEEK_MARGIN = 1;
-/** One ffmpeg call opens the source once per clip; more than this is split into passes. */
+/** One ffmpeg call opens a source once per clip; more than this is refused. */
 export const MAX_CLIPS = 300;
 
-/** Output file next to the source (or in `outDir`): name_montage.mkv, name_montage (2).mkv, ... */
-export function montageOutput(src: string, outDir: string | null): string {
+/** Output file next to the owner video (or in `outDir`): name_montage.mkv / .mp4, then (2), (3)... */
+export function montageOutput(src: string, outDir: string | null, format: MontageFormat = 'lossless'): string {
   const dir = outDir ?? path.dirname(src);
   const base = path.parse(src).name;
-  let candidate = path.join(dir, `${base}_montage.mkv`);
-  for (let i = 2; existsSync(candidate); i++) candidate = path.join(dir, `${base}_montage (${i}).mkv`);
+  const ext = format === 'mp4' ? 'mp4' : 'mkv';
+  let candidate = path.join(dir, `${base}_montage.${ext}`);
+  for (let i = 2; existsSync(candidate); i++) candidate = path.join(dir, `${base}_montage (${i}).${ext}`);
   return candidate;
 }
 
+const interlaced = (i: VideoInfo) => i.interlace === 'tff' || i.interlace === 'bff';
+const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+
+function rational(rate: string): [number, number] {
+  const [n, d] = rate.split('/').map(Number);
+  return n > 0 && d > 0 ? [n, d] : [Math.round(Number(rate)) || 25, 1];
+}
+
+/** Does this source need converting (size, pixel aspect, frame rate, pixel format) to match the project? */
+export function needsConversion(src: VideoInfo, target: VideoInfo): boolean {
+  const [a, b] = rational(src.fpsRational);
+  const [c, d] = rational(target.fpsRational);
+  return src.width !== target.width || src.height !== target.height
+    || src.sarNum * target.sarDen !== target.sarNum * src.sarDen
+    || a * d !== b * c || src.pixFmt !== target.pixFmt;
+}
+
+/** Size a source is scaled to so it fits the project frame without distortion (the rest is padded). */
+export function fitSize(src: VideoInfo, target: VideoInfo): { w: number; h: number } {
+  const srcDar = (src.width * src.sarNum) / src.sarDen / src.height;
+  const pixel = target.sarNum / target.sarDen;
+  const wAtFullHeight = (srcDar * target.height) / pixel;
+  if (wAtFullHeight <= target.width + 1) return { w: Math.min(target.width, even(wAtFullHeight)), h: target.height };
+  return { w: target.width, h: Math.min(target.height, even((target.width * pixel) / srcDar)) };
+}
+
 /**
- * ffmpeg arguments that cut the clips out of the source frame-exactly and join them.
- * Same timing rules as fragments: frame N is the slot startTime + N / fps, found by
- * timestamp (seek early, -copyts, fps filter), so dropped frames do not shift the audio.
+ * ffmpeg arguments for the whole montage. Every clip is cut by the same frame-exact rules
+ * as fragments (frame N of a source is the slot startTime + N / fps: seek early, -copyts,
+ * `fps` filter), converted to the project format only when its source differs (size with
+ * padding, frame rate, pixel format), then the clips are joined: `concat` for a hard cut,
+ * `xfade` + `acrossfade` for a transition.
  *
- * The result is lossless (FFV1 + FLAC in MKV) and keeps interlacing: it is an intermediate
- * that the enhancer processes next, so cutting must not cost any quality.
+ * Lossless output (FFV1 + FLAC, MKV) keeps interlacing when every clip already matches the
+ * project; once anything is converted (or for MP4) interlaced sources are deinterlaced first,
+ * because scaling or blending fields from different sources would tear them.
  */
-export function montageArgs(info: VideoInfo, clips: MontageClip[], output: string, hasAudio: boolean): string[] {
+export function montageArgs(
+  target: VideoInfo, sources: Map<string, VideoInfo>, clips: MontageClip[], output: string, opts: MontageOptions,
+): string[] {
+  const fps = target.fps;
+  const [rn, rd] = rational(target.fpsRational);
+  const lay = layout(clips, fps);
+  const infos = clips.map((c) => {
+    const info = sources.get(c.source);
+    if (!info) throw new Error(`Нет данных об исходнике ${c.source}`);
+    return info;
+  });
+  const converts = infos.map((i) => needsConversion(i, target));
+  const progressive = opts.format === 'mp4' || converts.some(Boolean);
+  const pixFmt = opts.format === 'mp4' ? 'yuv420p' : target.pixFmt;
+  const hasAudio = infos.some((i) => !!i.audioCodec);
+  const rate = target.audioSampleRate ?? infos.find((i) => i.audioSampleRate)?.audioSampleRate ?? 48000;
+  const channels = target.audioCodec ? (target.audioChannels ?? 2) : 2;
+  const chLayout = channels === 1 ? 'mono' : 'stereo';
+
   const inputs: string[] = [];
-  const filters: string[] = [];
-  const pads: string[] = [];
-  const rate = info.fpsRational;
+  const graph: string[] = [];
   for (const [i, c] of clips.entries()) {
-    const at = c.start / info.fps;
-    const len = clipFrames(c);
+    const src = infos[i];
+    const at = c.start / src.fps;
+    const n = c.end - c.start;
+    const len = lay.lengths[i];
     const ss = Math.max(0, at - SEEK_MARGIN);
     if (ss > 0) inputs.push('-ss', ss.toFixed(6));
-    inputs.push('-t', (at - ss + len / info.fps + 0.5).toFixed(6), '-i', info.path);
-    const t0 = info.startTime + at;
-    filters.push(`[${i}:v:0]fps=fps=${rate}:start_time=${t0.toFixed(6)},trim=end_frame=${len},setpts=N/((${rate})*TB)[v${i}]`);
-    pads.push(`[v${i}]`);
+    inputs.push('-t', (at - ss + n / src.fps + 0.5).toFixed(6), '-i', src.path);
+    const t0 = src.startTime + at;
+
+    const v = [`fps=fps=${src.fpsRational}:start_time=${t0.toFixed(6)}`, `trim=end_frame=${n}`];
+    if (progressive && interlaced(src)) v.push(`bwdif=mode=send_frame:parity=${src.interlace}`);
+    if (converts[i]) {
+      const [sn, sd] = rational(src.fpsRational);
+      // Rate conversion can be a frame short or long: pad by cloning, then cut to the exact length.
+      if (sn * rd !== sd * rn) v.push(`fps=fps=${target.fpsRational}`, 'tpad=stop_mode=clone:stop=2', `trim=end_frame=${len}`);
+      const fit = fitSize(src, target);
+      if (fit.w !== src.width || fit.h !== src.height || fit.w !== target.width || fit.h !== target.height
+          || src.sarNum * target.sarDen !== target.sarNum * src.sarDen) {
+        v.push(`scale=${fit.w}:${fit.h}:flags=lanczos`, `setsar=${target.sarNum}/${target.sarDen}`,
+          `pad=${target.width}:${target.height}:${(target.width - fit.w) >> 1}:${(target.height - fit.h) >> 1}:black`);
+      }
+    }
+    v.push(`format=${pixFmt}`, `settb=${rd}/${rn}`, 'setpts=N');
+
+    // Split off the frames that overlap the neighbours: only those go through xfade (which
+    // in FFmpeg 6.1 converts to 4:4:4 and back), so every other frame stays untouched.
+    const tin = lay.trans[i];
+    const tout = lay.trans[i + 1] ?? 0;
+    const parts: { label: string; from: number; to: number }[] = [];
+    if (tin) parts.push({ label: `h${i}`, from: 0, to: tin });
+    parts.push({ label: `b${i}`, from: tin, to: len - tout });
+    if (tout) parts.push({ label: `t${i}`, from: len - tout, to: len });
+    if (parts.length === 1) {
+      graph.push(`[${i}:v:0]${v.join(',')}[b${i}]`);
+    } else {
+      graph.push(`[${i}:v:0]${v.join(',')},split=${parts.length}${parts.map((p) => `[s${p.label}]`).join('')}`);
+      for (const p of parts) graph.push(`[s${p.label}]trim=start_frame=${p.from}:end_frame=${p.to},setpts=N[${p.label}]`);
+    }
+
     if (hasAudio) {
-      const t1 = t0 + len / info.fps;
-      filters.push(`[${i}:a:0]atrim=start=${t0.toFixed(6)}:end=${t1.toFixed(6)},asetpts=PTS-STARTPTS[a${i}]`);
-      pads.push(`[a${i}]`);
+      const dur = (len / fps).toFixed(6);
+      if (src.audioCodec) {
+        const t1 = t0 + n / src.fps;
+        graph.push(`[${i}:a:0]atrim=start=${t0.toFixed(6)}:end=${t1.toFixed(6)},asetpts=PTS-STARTPTS,`
+          + `aresample=${rate},aformat=sample_rates=${rate}:channel_layouts=${chLayout},apad=whole_dur=${dur},atrim=end=${dur}[a${i}]`);
+      } else {
+        graph.push(`anullsrc=r=${rate}:cl=${chLayout}:d=${dur}[a${i}]`);
+      }
     }
   }
-  filters.push(`${pads.join('')}concat=n=${clips.length}:v=1:a=${hasAudio ? 1 : 0}[v]${hasAudio ? '[a]' : ''}`);
 
-  const fieldOrder = info.interlace === 'tff' ? ['-field_order', 'tt'] : info.interlace === 'bff' ? ['-field_order', 'bb'] : [];
+  // Video: body 0, transition 0->1, body 1, ... joined by one concat.
+  const pieces: string[] = ['b0'];
+  for (let i = 1; i < clips.length; i++) {
+    if (lay.trans[i] > 0) {
+      const kind = clips[i].transitionIn?.kind ?? 'fade';
+      const dur = (lay.trans[i] / fps).toFixed(6);
+      graph.push(`[t${i - 1}][h${i}]xfade=transition=${kind}:duration=${dur}:offset=0,format=${pixFmt},settb=${rd}/${rn},setpts=N[x${i}]`);
+      pieces.push(`x${i}`);
+    }
+    pieces.push(`b${i}`);
+  }
+  let v = 'vout';
+  if (pieces.length === 1) v = pieces[0];
+  else graph.push(`${pieces.map((p) => `[${p}]`).join('')}concat=n=${pieces.length}:v=1:a=0,settb=${rd}/${rn},setpts=N[vout]`);
+
+  // Audio: left to right, a 2-way concat for a cut, acrossfade for a transition.
+  let a = 'a0';
+  if (hasAudio) {
+    for (let i = 1; i < clips.length; i++) {
+      const t = lay.trans[i];
+      graph.push(t > 0
+        ? `[${a}][a${i}]acrossfade=d=${(t / fps).toFixed(6)}:c1=tri:c2=tri[aj${i}]`
+        : `[${a}][a${i}]concat=n=2:v=0:a=1[aj${i}]`);
+      a = `aj${i}`;
+    }
+  }
+
+  const fieldOrder = !progressive && target.interlace === 'tff' ? ['-field_order', 'tt']
+    : !progressive && target.interlace === 'bff' ? ['-field_order', 'bb'] : [];
+  const encode = opts.format === 'mp4'
+    ? ['-c:v', 'libx264', '-preset', 'medium', '-crf', String(opts.crf ?? 18), '-pix_fmt', 'yuv420p',
+      ...(hasAudio ? ['-c:a', 'aac', '-b:a', '192k'] : []), '-movflags', '+faststart']
+    : ['-c:v', 'ffv1', '-level', '3', '-g', '1', '-slices', '4', '-slicecrc', '1', ...fieldOrder,
+      ...(hasAudio ? ['-c:a', 'flac'] : [])];
   return [
     '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-copyts',
     ...inputs,
-    '-filter_complex', filters.join(';'),
-    '-map', '[v]', ...(hasAudio ? ['-map', '[a]'] : []),
-    '-c:v', 'ffv1', '-level', '3', '-g', '1', '-slices', '4', '-slicecrc', '1', ...fieldOrder,
-    '-r', rate, ...(hasAudio ? ['-c:a', 'flac'] : []),
+    '-filter_complex', graph.join(';'),
+    '-map', `[${v}]`, ...(hasAudio ? ['-map', `[${a}]`] : []),
+    ...encode, '-r', target.fpsRational, '-frames:v', String(lay.total),
     output,
   ];
 }
 
-/** Render the montage to a lossless MKV. Written to a temp name first, so a cancelled render leaves nothing. */
+export interface MontageOptions {
+  format: MontageFormat;
+  /** H.264 CRF for MP4. */
+  crf?: number;
+}
+
+/** Render the montage. Written to a temp name first, so a cancelled render leaves nothing. */
 export async function renderMontage(
-  info: VideoInfo, clips: MontageClip[], output: string, signal: AbortSignal,
-  onProgress: (p: Omit<MontageProgress, 'output'>) => void,
+  target: VideoInfo, sources: Map<string, VideoInfo>, clips: MontageClip[], output: string, opts: MontageOptions,
+  signal: AbortSignal, onProgress: (p: Omit<MontageProgress, 'output'>) => void,
 ): Promise<void> {
-  if (!validMontage(clips, Math.max(1, info.frames))) throw new Error('Монтаж пуст или выходит за пределы видео.');
+  const lengths = Object.fromEntries([...sources].map(([p, i]) => [p, Math.max(1, i.frames)]));
+  if (!validMontage(clips, lengths)) throw new Error('Монтаж пуст или выходит за пределы видео.');
   if (clips.length > MAX_CLIPS) throw new Error(`Слишком много клипов (${clips.length}), максимум ${MAX_CLIPS}.`);
-  const total = montageFrames(clips);
-  const tmp = `${output}.part.mkv`;
+  const total = montageFrames(clips, target.fps);
+  const ext = path.extname(output);
+  const tmp = `${output}.part${ext}`;
   const started = Date.now();
   mkdirSync(path.dirname(output), { recursive: true });
   try {
-    await runOk(requireTool('ffmpeg'), montageArgs(info, clips, tmp, !!info.audioCodec), {
+    await runOk(requireTool('ffmpeg'), montageArgs(target, sources, clips, tmp, opts), {
       signal,
       onStdout: frameCounter((n) => {
         const done = Math.min(n, total);

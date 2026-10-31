@@ -43,9 +43,12 @@ function createMock(): EnhancerApi {
     startTime: 0,
     frames: 460,
     videoCodec: 'mpeg4',
+    pixFmt: 'yuv420p',
     videoBitrateKbps: 1512,
     audioCodec: 'mp3',
     audioBitrateKbps: 192,
+    audioSampleRate: 44100,
+    audioChannels: 2,
     interlace: 'tff',
     interlaceRatio: 0.92,
     suggestedCrop: { w: 752, h: 560, x: 8, y: 8 },
@@ -96,7 +99,7 @@ function createMock(): EnhancerApi {
         montageProgress.forEach((cb) => cb({ percent: i }));
         await new Promise((r) => setTimeout(r, 250));
       }
-      return req.path.replace(/(\.[^.]+)?$/, '_montage.mkv');
+      return req.owner.replace(/(\.[^.]+)?$/, req.format === 'mp4' ? '_montage.mp4' : '_montage.mkv');
     },
     cancelMontage: async () => undefined,
     onMontageProgress: (cb) => {

@@ -32,9 +32,13 @@ export interface VideoInfo {
   startTime: number;
   frames: number;
   videoCodec: string;
+  /** ffmpeg pixel format, e.g. yuv420p. */
+  pixFmt: string;
   videoBitrateKbps?: number;
   audioCodec?: string;
   audioBitrateKbps?: number;
+  audioSampleRate?: number;
+  audioChannels?: number;
   interlace: InterlaceKind;
   /** Share of frames detected as interlaced (0..1). */
   interlaceRatio: number;
@@ -194,10 +198,17 @@ export interface Thumbnails {
   files: string[];
 }
 
+/** lossless: FFV1 + FLAC in MKV, for further enhancement. mp4: H.264 + AAC, to watch and share. */
+export type MontageFormat = 'lossless' | 'mp4';
+
 export interface MontageRequest {
-  path: string;
+  /** The video the montage belongs to: it sets size, frame rate and the output name. */
+  owner: string;
   clips: MontageClip[];
-  /** Folder for the result; null = next to the source. */
+  format: MontageFormat;
+  /** H.264 CRF for MP4 (18 = high, 23 = smaller). */
+  crf?: number;
+  /** Folder for the result; null = next to the owner video. */
   outDir: string | null;
 }
 

@@ -1,12 +1,12 @@
 import {
-  ChangeDetectionStrategy, Component, computed, effect, ElementRef, input, OnDestroy, output, signal, untracked, viewChild,
+  ChangeDetectionStrategy, Component, computed, effect, ElementRef, input, OnDestroy, output, signal, untracked, viewChildren,
 } from '@angular/core';
 import {
-  clipFrames, clipStartFrame, type MontageClip, locate, montageFrames, moveClip, removeClips, sourceFrameAt, splitClip,
-  trimClip,
+  layout, locate, type MontageClip, moveClip, removeClips, setAllTransitions, setTransition, sourceFrameAt, sourceFrameOf,
+  splitClip, type Transition, type TransitionKind, TRANSITIONS, trimClip,
 } from '../../../shared/montage';
-import type { VideoInfo } from '../../../shared/types';
-import type { MontageState } from '../store';
+import type { MontageFormat } from '../../../shared/types';
+import type { MontageState, SourceMedia } from '../montage-store';
 
 interface Tile {
   x: number;
@@ -19,6 +19,15 @@ interface ClipView {
   left: number;
   width: number;
   tiles: Tile[];
+  hue: number;
+  label: string;
+  missing: boolean;
+}
+
+interface JoinView {
+  index: number;
+  x: number;
+  transition?: Transition;
 }
 
 interface Drag {
@@ -27,17 +36,28 @@ interface Drag {
   x0: number;
   base: MontageClip[];
   frame0: number;
+  fps: number;
+}
+
+export interface QueueEntry {
+  path: string;
+  name: string;
 }
 
 /** Thumbnail height on the timeline, px (thumbnails are rendered at 72 px). */
 const TILE_H = 54;
 /** Space left of the first clip, px, so the playhead at 0 is visible. */
 const PAD = 12;
+/** Transition lengths offered, seconds. */
+export const TRANSITION_SECONDS = [0.25, 0.5, 1, 1.5, 2];
+
+const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
 
 /**
- * Simple Clipchamp-style montage: play the video, cut it into clips at the playhead, delete,
- * trim and reorder clips, undo/redo up to 5 steps, then render. Edits are emitted as whole
- * cut lists; history lives in the store.
+ * Clipchamp-style montage: play the cut, cut it into clips at the playhead, delete, trim and
+ * reorder clips, add other videos, put transitions on the joins, undo/redo up to 5 steps,
+ * then render losslessly or to MP4. Edits are emitted as whole cut lists; history and
+ * saving live in MontageStore.
  */
 @Component({
   selector: 'app-montage-editor',
@@ -47,48 +67,74 @@ const PAD = 12;
   host: { '(window:keydown)': 'onKey($event)' },
 })
 export class MontageEditor implements OnDestroy {
-  readonly info = input.required<VideoInfo>();
   readonly state = input.required<MontageState>();
-  readonly proxySrc = input<string | null>(null);
-  readonly proxyError = input<string | null>(null);
+  readonly sources = input.required<Record<string, SourceMedia>>();
+  /** Videos in the clip list, offered in «+ Видео». */
+  readonly queue = input<QueueEntry[]>([]);
 
   readonly edit = output<MontageClip[]>();
   readonly undo = output<void>();
   readonly redo = output<void>();
+  readonly add = output<{ paths: string[] | 'pick'; after: number }>();
+  readonly restart = output<void>();
+  readonly outputFormat = output<{ format: MontageFormat; crf?: number }>();
   readonly render = output<void>();
   readonly cancelRender = output<void>();
   readonly openResult = output<string>();
 
-  /** Playhead in montage frames. */
+  readonly transitions = TRANSITIONS;
+  readonly transitionSeconds = TRANSITION_SECONDS;
+
+  /** Playhead in project frames. */
   readonly playhead = signal(0);
   readonly playing = signal(false);
   readonly selectedId = signal<string | null>(null);
+  /** Join (index of the clip after it) whose transition is being edited. */
+  readonly selectedJoin = signal<number | null>(null);
+  readonly addMenu = signal(false);
+  /** Source shown in the player. */
+  readonly activeSource = signal<string | null>(null);
   /** Pixels per second on the timeline. */
   readonly pps = signal(0);
-  /** Cut list while an edge is being dragged (committed on release). */
   private readonly draft = signal<MontageClip[] | null>(null);
   private drag: Drag | null = null;
   private playIndex = 0;
   private frameCb = 0;
+  private frameCbVideo: HTMLVideoElement | null = null;
 
-  private readonly video = viewChild<ElementRef<HTMLVideoElement>>('video');
-  private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
+  private readonly videos = viewChildren<ElementRef<HTMLVideoElement>>('video');
+  private readonly scrollers = viewChildren<ElementRef<HTMLElement>>('scroller');
 
+  readonly fps = computed(() => this.state().fps);
+  readonly owner = computed(() => this.sources()[this.state().owner]?.info ?? null);
   readonly clips = computed(() => this.draft() ?? this.state().history.present);
-  readonly fps = computed(() => this.info().fps);
-  readonly total = computed(() => montageFrames(this.clips()));
+  readonly lay = computed(() => layout(this.clips(), this.fps()));
+  readonly total = computed(() => this.lay().total);
   readonly canUndo = computed(() => this.state().history.past.length);
   readonly canRedo = computed(() => this.state().history.future.length);
   readonly selected = computed(() => this.clips().find((c) => c.id === this.selectedId()) ?? null);
   readonly selectedIndex = computed(() => this.clips().findIndex((c) => c.id === this.selectedId()));
-  readonly rendering = computed(() => this.state().rendering);
+  readonly rendering = computed(() => !!this.state().rendering);
+  readonly busy = computed(() => this.rendering() || !!this.state().adding);
 
-  /** Splitting is possible when the playhead is strictly inside a clip. */
+  /** Sources in use, in order (one <video> each). */
+  readonly usedSources = computed(() => {
+    const all = this.sources();
+    const paths = [...new Set([this.state().owner, ...this.clips().map((c) => c.source)])];
+    return paths.map((path, i) => ({ path, name: baseName(path), proxy: all[path]?.proxy ?? null, hue: (i * 67 + 265) % 360 }));
+  });
+  readonly multiSource = computed(() => new Set(this.clips().map((c) => c.source)).size > 1);
+  readonly missing = computed(() => {
+    const all = this.sources();
+    return [...new Set(this.clips().map((c) => c.source))].filter((p) => all[p]?.error && !all[p]?.info);
+  });
+  readonly anyProxy = computed(() => this.usedSources().some((s) => s.proxy));
+
   readonly canSplit = computed(() => {
     const clips = this.clips();
     if (!clips.length) return false;
-    const { index, offset } = locate(clips, this.playhead());
-    return offset > 0 && offset < clipFrames(clips[index]);
+    const { index, offset } = locate(clips, this.fps(), this.playhead());
+    return offset > 0 && offset < this.lay().lengths[index];
   });
 
   readonly width = computed(() => PAD * 2 + (this.total() / this.fps()) * this.pps());
@@ -96,26 +142,61 @@ export class MontageEditor implements OnDestroy {
   readonly views = computed<ClipView[]>(() => {
     const fps = this.fps();
     const pps = this.pps();
-    const thumbs = this.state().thumbs;
-    const tileW = Math.round(TILE_H * Math.max(0.5, this.info().dar));
-    let start = 0;
+    const all = this.sources();
+    const hues = new Map(this.usedSources().map((s) => [s.path, s.hue]));
+    const dar = this.owner()?.dar ?? 4 / 3;
+    const tileW = Math.round(TILE_H * Math.max(0.5, dar));
+    const { starts, lengths } = this.lay();
     return this.clips().map((clip, index) => {
-      const left = PAD + (start / fps) * pps;
-      const width = (clipFrames(clip) / fps) * pps;
-      start += clipFrames(clip);
+      const left = PAD + (starts[index] / fps) * pps;
+      const width = (lengths[index] / fps) * pps;
+      const thumbs = all[clip.source]?.thumbs;
       const tiles: Tile[] = [];
       if (thumbs?.urls.length && width > 2) {
         for (let x = 0; x < width; x += tileW) {
-          const t = clip.start / fps + x / pps;
-          const k = Math.min(thumbs.urls.length - 1, Math.floor(t / thumbs.interval));
-          tiles.push({ x, url: thumbs.urls[k] });
+          // Timeline seconds map 1:1 to source seconds (frame-rate conversion keeps time).
+          const t = clip.start / clip.fps + x / pps;
+          tiles.push({ x, url: thumbs.urls[Math.min(thumbs.urls.length - 1, Math.floor(t / thumbs.interval))] });
         }
       }
-      return { clip, index, left, width, tiles };
+      return {
+        clip, index, left, width, tiles, hue: hues.get(clip.source) ?? 265, label: baseName(clip.source),
+        missing: !!all[clip.source]?.error && !all[clip.source]?.info,
+      };
     });
   });
 
-  /** Ruler ticks: a step that keeps labels ~80 px apart. */
+  readonly joins = computed<JoinView[]>(() => {
+    const { starts, trans } = this.lay();
+    return this.clips().slice(1).map((c, k) => {
+      const i = k + 1;
+      return { index: i, x: PAD + ((starts[i] + trans[i] / 2) / this.fps()) * this.pps(), transition: c.transitionIn };
+    });
+  });
+
+  readonly join = computed(() => {
+    const i = this.selectedJoin();
+    if (i === null || i < 1 || i >= this.clips().length) return null;
+    const c = this.clips()[i];
+    return { index: i, clip: c, kind: c.transitionIn?.kind ?? null, seconds: (c.transitionIn?.frames ?? 0) / this.fps(), used: this.lay().trans[i] };
+  });
+
+  /** What the player overlay shows inside a transition: fade-to-black darkness, or a label. */
+  readonly overlay = computed(() => {
+    const f = this.playhead();
+    const { starts, trans } = this.lay();
+    for (let i = 1; i < trans.length; i++) {
+      if (!trans[i] || f < starts[i] || f >= starts[i] + trans[i]) continue;
+      const kind = this.clips()[i].transitionIn?.kind;
+      const p = (f - starts[i] + 0.5) / trans[i];
+      return {
+        black: kind === 'fadeblack' ? 1 - Math.abs(2 * p - 1) : 0,
+        label: TRANSITIONS.find((t) => t.kind === kind)?.title ?? '',
+      };
+    }
+    return null;
+  });
+
   readonly ticks = computed(() => {
     const pps = this.pps();
     const seconds = this.total() / this.fps();
@@ -129,24 +210,22 @@ export class MontageEditor implements OnDestroy {
   readonly playheadX = computed(() => PAD + (this.playhead() / this.fps()) * this.pps());
 
   constructor() {
-    // Fit the whole montage when the editor opens or the clip changes.
     effect(() => {
-      this.info();
+      this.state().owner;
       untracked(() => queueMicrotask(() => this.fit()));
     });
-    // After an edit, keep the playhead inside the montage and the picture in sync.
+    // After an edit (or once players appear), keep the playhead inside the montage and the picture in sync.
     effect(() => {
       const total = this.total();
+      this.anyProxy();
       untracked(() => {
-        if (this.playing()) return;
-        const f = Math.min(this.playhead(), Math.max(0, total - 1));
-        this.seek(f);
+        if (!this.playing()) this.seek(Math.min(this.playhead(), Math.max(0, total - 1)));
       });
     });
   }
 
   ngOnDestroy() {
-    this.video()?.nativeElement.pause();
+    this.videos().forEach((v) => v.nativeElement.pause());
   }
 
   time(frame: number): string {
@@ -155,79 +234,112 @@ export class MontageEditor implements OnDestroy {
 
   // --- Playback -----------------------------------------------------------------------
 
-  /** Show montage frame `frame`: set the playhead and seek the source video. */
+  private videoOf(source: string | null): HTMLVideoElement | undefined {
+    return this.videos().map((v) => v.nativeElement).find((v) => v.dataset['src'] === source);
+  }
+
+  /** Show timeline frame `frame`: set the playhead, pick the source's player and seek it. */
   seek(frame: number) {
     const total = this.total();
     const f = Math.min(Math.max(0, total - 1), Math.max(0, Math.round(frame)));
     this.playhead.set(total ? f : 0);
-    const v = this.video()?.nativeElement;
-    if (v && total) {
-      this.playIndex = locate(this.clips(), f).index;
-      v.currentTime = (sourceFrameAt(this.clips(), f) + 0.5) / this.fps();
-    }
+    if (!total) return;
+    const clips = this.clips();
+    const { index, frame: src } = sourceFrameAt(clips, this.fps(), f);
+    const c = clips[index];
+    this.playIndex = index;
+    this.activeSource.set(c.source);
+    const v = this.videoOf(c.source);
+    if (v) v.currentTime = (src + 0.5) / c.fps;
   }
 
   togglePlay() {
-    const v = this.video()?.nativeElement;
-    if (!v || !this.total()) return;
-    if (!v.paused) {
-      v.pause();
+    const active = this.videoOf(this.activeSource());
+    if (active && !active.paused) {
+      active.pause();
       return;
     }
-    if (this.playhead() >= this.total() - 1) this.seek(0);
-    else this.seek(this.playhead());
+    if (!this.total()) return;
+    this.seek(this.playhead() >= this.total() - 1 ? 0 : this.playhead());
+    const v = this.videoOf(this.activeSource());
+    if (!v) return;
     void v.play();
-    this.watchFrames();
+    this.watchFrames(v);
   }
 
   onPlay() {
     this.playing.set(true);
   }
 
-  onPause() {
+  onPause(e: Event) {
+    if (e.target !== this.videoOf(this.activeSource())) return; // a player we switched away from
     this.playing.set(false);
-    const v = this.video()?.nativeElement;
-    if (v && this.frameCb) v.cancelVideoFrameCallback(this.frameCb);
-    this.frameCb = 0;
+    this.stopWatching();
   }
 
-  /** While playing, follow the cut list: jump to the next clip when the current one ends. */
-  private watchFrames() {
-    const v = this.video()?.nativeElement;
-    if (!v) return;
+  private stopWatching() {
+    if (this.frameCbVideo && this.frameCb) this.frameCbVideo.cancelVideoFrameCallback(this.frameCb);
+    this.frameCb = 0;
+    this.frameCbVideo = null;
+  }
+
+  /** While playing, follow the cut list: jump (or switch player) when a clip's part ends. */
+  private watchFrames(v: HTMLVideoElement) {
+    this.stopWatching();
     const tick = (_now: number, meta: VideoFrameCallbackMetadata) => {
       const clips = this.clips();
-      const clip = clips[this.playIndex];
-      if (!clip || v.paused) return;
-      const src = Math.round(meta.mediaTime * this.fps());
-      if (src >= clip.end - 1 || src < clip.start - 1) {
-        const next = clips[this.playIndex + 1];
-        if (src >= clip.end - 1 && next) {
-          this.playIndex++;
-          v.currentTime = (next.start + 0.5) / this.fps();
-          this.playhead.set(clipStartFrame(clips, this.playIndex));
-        } else if (src >= clip.end - 1) {
+      const fps = this.fps();
+      const { starts, lengths, trans } = this.lay();
+      const i = this.playIndex;
+      const c = clips[i];
+      if (!c || v.paused) return;
+      const src = Math.round(meta.mediaTime * c.fps);
+      // This clip is shown until the middle of the transition into the next one.
+      const endOffset = lengths[i] - Math.floor((trans[i + 1] ?? 0) / 2);
+      const endSrc = c.start + Math.round((endOffset * c.fps) / fps);
+      if (src >= endSrc - 1) {
+        const next = clips[i + 1];
+        if (!next) {
           v.pause();
           this.playhead.set(this.total() - 1);
           return;
         }
-      } else {
-        this.playhead.set(clipStartFrame(clips, this.playIndex) + (src - clip.start));
+        this.playIndex = i + 1;
+        const startOffset = Math.ceil(trans[i + 1] / 2);
+        const nextSrc = sourceFrameOf(next, startOffset, fps);
+        this.playhead.set(starts[i + 1] + startOffset);
+        const nv = this.videoOf(next.source);
+        if (!nv) return;
+        nv.currentTime = (nextSrc + 0.5) / next.fps;
+        if (nv !== v) {
+          // Different source: hand over to its player.
+          this.activeSource.set(next.source);
+          v.pause();
+          void nv.play();
+          this.watchFrames(nv);
+          return;
+        }
+      } else if (src >= c.start) {
+        this.playhead.set(starts[i] + Math.round(((src - c.start) * fps) / c.fps));
       }
       this.frameCb = v.requestVideoFrameCallback(tick);
     };
+    this.frameCbVideo = v;
     this.frameCb = v.requestVideoFrameCallback(tick);
   }
 
+  private pause() {
+    this.videoOf(this.activeSource())?.pause();
+  }
+
   step(frames: number) {
-    this.video()?.nativeElement.pause();
+    this.pause();
     this.seek(this.playhead() + frames);
   }
 
   jumpSeconds(sec: number) {
-    const v = this.video()?.nativeElement;
-    const wasPlaying = v && !v.paused;
-    v?.pause();
+    const wasPlaying = this.playing();
+    this.pause();
     this.seek(this.playhead() + Math.round(sec * this.fps()));
     if (wasPlaying) this.togglePlay();
   }
@@ -235,16 +347,16 @@ export class MontageEditor implements OnDestroy {
   // --- Timeline -----------------------------------------------------------------------
 
   private frameAtX(clientX: number): number {
-    const el = this.scroller()?.nativeElement;
+    const el = this.scrollers()[0]?.nativeElement;
     if (!el) return 0;
     const x = clientX - el.getBoundingClientRect().left + el.scrollLeft - PAD;
     return Math.round((x / this.pps()) * this.fps());
   }
 
-  /** Click or drag on the ruler/empty track moves the playhead. */
   scrubStart(e: PointerEvent) {
     if (e.button !== 0) return;
-    this.video()?.nativeElement.pause();
+    this.pause();
+    this.selectedJoin.set(null);
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     this.seek(this.frameAtX(e.clientX));
@@ -260,32 +372,41 @@ export class MontageEditor implements OnDestroy {
   clickClip(view: ClipView, e: PointerEvent) {
     if (e.button !== 0) return;
     e.stopPropagation();
-    this.video()?.nativeElement.pause();
+    this.pause();
     this.selectedId.set(view.clip.id);
+    this.selectedJoin.set(null);
     this.seek(this.frameAtX(e.clientX));
+  }
+
+  clickJoin(j: JoinView, e: Event) {
+    e.stopPropagation();
+    this.pause();
+    this.selectedJoin.set(this.selectedJoin() === j.index ? null : j.index);
+    this.seek(this.lay().starts[j.index]);
   }
 
   /** Drag a clip edge to trim it (ripple: later clips move along). One history step per drag. */
   trimStart(view: ClipView, edge: 'start' | 'end', e: PointerEvent) {
     if (e.button !== 0) return;
     e.stopPropagation();
-    this.video()?.nativeElement.pause();
+    this.pause();
     this.selectedId.set(view.clip.id);
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     this.drag = {
-      id: view.clip.id, edge, x0: e.clientX, base: this.clips(), frame0: edge === 'start' ? view.clip.start : view.clip.end,
+      id: view.clip.id, edge, x0: e.clientX, base: this.clips(), fps: view.clip.fps,
+      frame0: edge === 'start' ? view.clip.start : view.clip.end,
     };
+    const total = this.sources()[view.clip.source]?.info?.frames ?? view.clip.end;
     const move = (ev: PointerEvent) => {
       const d = this.drag;
       if (!d) return;
-      const delta = Math.round(((ev.clientX - d.x0) / this.pps()) * this.fps());
-      const next = trimClip(d.base, d.id, d.edge, d.frame0 + delta, this.info().frames);
+      const delta = Math.round(((ev.clientX - d.x0) / this.pps()) * d.fps);
+      const next = trimClip(d.base, d.id, d.edge, d.frame0 + delta, total);
       this.draft.set(next);
-      // Show the frame at the edge being dragged.
       const i = next.findIndex((c) => c.id === d.id);
-      const c = next[i];
-      this.seek(d.edge === 'start' ? clipStartFrame(next, i) : clipStartFrame(next, i) + clipFrames(c) - 1);
+      const lay = layout(next, this.fps());
+      this.seek(d.edge === 'start' ? lay.starts[i] : lay.starts[i] + lay.lengths[i] - 1);
     };
     const up = () => {
       target.removeEventListener('pointermove', move);
@@ -303,9 +424,9 @@ export class MontageEditor implements OnDestroy {
 
   split() {
     if (!this.canSplit()) return;
-    const next = splitClip(this.clips(), this.playhead());
+    const next = splitClip(this.clips(), this.fps(), this.playhead());
     this.edit.emit(next);
-    this.selectedId.set(next[locate(next, this.playhead()).index].id);
+    this.selectedId.set(next[locate(next, this.fps(), this.playhead()).index].id);
   }
 
   remove() {
@@ -314,10 +435,10 @@ export class MontageEditor implements OnDestroy {
     const i = this.selectedIndex();
     const next = removeClips(this.clips(), [sel.id]);
     this.edit.emit(next);
-    // Select the clip that took its place, playhead at its start (like Clipchamp).
-    const neighbour = next[Math.min(i, next.length - 1)];
-    this.selectedId.set(neighbour?.id ?? null);
-    queueMicrotask(() => this.seek(neighbour ? clipStartFrame(next, Math.min(i, next.length - 1)) : 0));
+    const k = Math.min(i, next.length - 1);
+    this.selectedId.set(next[k]?.id ?? null);
+    this.selectedJoin.set(null);
+    queueMicrotask(() => this.seek(k >= 0 ? layout(next, this.fps()).starts[k] : 0));
   }
 
   move(delta: number) {
@@ -329,19 +450,38 @@ export class MontageEditor implements OnDestroy {
   trimAtPlayhead(edge: 'start' | 'end') {
     const clips = this.clips();
     if (!clips.length) return;
-    const { index, offset } = locate(clips, this.playhead());
+    const { index, offset } = locate(clips, this.fps(), this.playhead());
     const c = clips[index];
-    const frame = edge === 'start' ? c.start + offset : c.start + offset + 1;
+    const src = sourceFrameOf(c, offset, this.fps());
+    const total = this.sources()[c.source]?.info?.frames ?? c.end;
     this.selectedId.set(c.id);
-    this.edit.emit(trimClip(clips, c.id, edge, frame, this.info().frames));
+    this.edit.emit(trimClip(clips, c.id, edge, edge === 'start' ? src : src + 1, total));
+  }
+
+  setJoin(kind: TransitionKind | null, seconds?: number) {
+    const j = this.join();
+    if (!j) return;
+    const secs = seconds ?? (j.seconds || 0.5);
+    this.edit.emit(setTransition(this.clips(), j.clip.id, kind ? { kind, frames: Math.round(secs * this.fps()) } : null));
+  }
+
+  setAllJoins() {
+    const j = this.join();
+    if (!j) return;
+    const t = j.kind ? { kind: j.kind, frames: Math.round((j.seconds || 0.5) * this.fps()) } : null;
+    this.edit.emit(setAllTransitions(this.clips(), t));
+  }
+
+  addVideos(paths: string[] | 'pick') {
+    this.addMenu.set(false);
+    const i = this.selectedIndex();
+    this.add.emit({ paths, after: i >= 0 ? i : this.clips().length - 1 });
   }
 
   zoom(factor: number) {
-    const el = this.scroller()?.nativeElement;
-    const min = this.fitPps() / 2;
-    const next = Math.min(400, Math.max(min, this.pps() * factor));
+    const el = this.scrollers()[0]?.nativeElement;
+    const next = Math.min(400, Math.max(this.fitPps() / 2, this.pps() * factor));
     this.pps.set(next);
-    // Keep the playhead in view.
     if (el) queueMicrotask(() => (el.scrollLeft = Math.max(0, this.playheadX() - el.clientWidth / 2)));
   }
 
@@ -350,15 +490,14 @@ export class MontageEditor implements OnDestroy {
   }
 
   private fitPps(): number {
-    const el = this.scroller()?.nativeElement;
+    const el = this.scrollers()[0]?.nativeElement;
     const w = (el?.clientWidth ?? 800) - PAD * 2;
-    const seconds = Math.max(1, this.total() / this.fps());
-    return w / seconds;
+    return w / Math.max(1, this.total() / this.fps());
   }
 
   onKey(e: KeyboardEvent) {
     const tag = (e.target as HTMLElement | null)?.tagName;
-    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || this.rendering()) return;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || this.busy()) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
     let handled = true;
@@ -372,8 +511,22 @@ export class MontageEditor implements OnDestroy {
     else if (key === 'arrowright') this.step(e.shiftKey ? Math.round(this.fps()) : 1);
     else if (key === 'home') this.seek(0);
     else if (key === 'end') this.seek(this.total() - 1);
-    else handled = false;
+    else if (key === 'escape') {
+      this.addMenu.set(false);
+      this.selectedJoin.set(null);
+    } else handled = false;
     if (handled) e.preventDefault();
+  }
+
+  /** The offered length closest to `seconds` (frame rounding makes exact matches rare: 0.5 s at 25 fps is 0.52 s). */
+  closestSeconds(seconds: number): number {
+    return TRANSITION_SECONDS.reduce((best, s) => (Math.abs(s - seconds) < Math.abs(best - seconds) ? s : best));
+  }
+
+  savedLabel(): string {
+    const t = this.state().savedAt;
+    if (!t) return '';
+    return new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
 }
 

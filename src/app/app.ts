@@ -5,7 +5,8 @@ import type { Segment } from '../../shared/segments';
 import type { ProcessOptions } from '../../shared/types';
 import { formatDuration, PreviewCompare, PreviewRun } from './preview-compare/preview-compare';
 import type { MontageClip } from '../../shared/montage';
-import { MontageEditor } from './montage-editor/montage-editor';
+import { MontageEditor, type QueueEntry } from './montage-editor/montage-editor';
+import { MontageStore } from './montage-store';
 import { SegmentEditor, type SegmentPreview } from './segment-editor/segment-editor';
 import { SettingsPanel } from './settings-panel/settings-panel';
 import { Clip, isActive, Store } from './store';
@@ -38,6 +39,10 @@ const STAGE_LABEL: Record<string, string> = {
 })
 export class App {
   protected readonly store = inject(Store);
+  protected readonly montage = inject(MontageStore);
+  /** Videos in the list, offered when adding to a montage. */
+  protected readonly queueEntries = computed<QueueEntry[]>(() =>
+    this.store.clips().filter((c) => c.info).map((c) => ({ path: c.path, name: c.name })));
   protected readonly dragging = signal(false);
   protected readonly tab = signal<Tab>('settings');
   protected readonly mediaUrl = (p: string) => this.store.api.mediaUrl(p);
@@ -59,11 +64,8 @@ export class App {
     this.tab.set(tab);
     const c = this.selected();
     if (!c) return;
-    if (tab === 'segments' || tab === 'montage') void this.store.loadProxy(c.id);
-    if (tab === 'montage') {
-      this.store.montage(c.id);
-      void this.store.loadThumbnails(c.id);
-    }
+    if (tab === 'segments') void this.store.loadProxy(c.id);
+    if (tab === 'montage') this.montage.open(c.path, c.info);
   }
 
   protected selectClip(id: string) {
@@ -74,7 +76,23 @@ export class App {
 
   protected editMontage(clips: MontageClip[]) {
     const c = this.selected();
-    if (c) this.store.editMontage(c.id, clips);
+    if (c) this.montage.edit(c.path, clips);
+  }
+
+  protected addToMontage(e: { paths: string[] | 'pick'; after: number }) {
+    const c = this.selected();
+    if (!c) return;
+    if (e.paths === 'pick') void this.montage.pickAndAdd(c.path, e.after);
+    else void this.montage.add(c.path, e.paths, e.after);
+  }
+
+  /** Start screen: reopen a saved montage (adds its video to the list if needed). */
+  protected continueMontage(owner: string) {
+    const existing = this.store.clips().find((c) => c.path === owner);
+    const id = existing?.id ?? this.store.addPaths([owner])[0];
+    if (!id) return;
+    this.selectClip(id);
+    this.openTab('montage');
   }
 
   protected setSegments(segments: Segment[] | null) {
