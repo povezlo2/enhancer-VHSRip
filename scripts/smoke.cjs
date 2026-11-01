@@ -108,7 +108,7 @@ app.whenReady().then(async () => {
     if (shownSeconds !== '0.5') throw new Error('transition length shown as ' + shownSeconds);
     // Playback hands over to the second video's player at the last join.
     await key('End');
-    await waitFor(wc, `document.querySelector('app-montage-editor video.active')?.dataset.src?.endsWith('smoke_second.mp4')`, 10000);
+    await waitFor(wc, `document.querySelector('app-montage-editor video.active')?.dataset.key?.endsWith('smoke_second.mp4')`, 10000);
     console.log('montage', await wc.executeJavaScript(`document.querySelector('app-montage-editor .tc').innerText`), '3 clips, 2 sources, transition set');
     await key('Home');
     await sleep(600);
@@ -134,6 +134,27 @@ app.whenReady().then(async () => {
     await wc.executeJavaScript(`document.querySelector('.recent-open').click()`);
     await waitFor(wc, `document.querySelectorAll('app-montage-editor .clip').length === 3 && !!document.querySelector('app-montage-editor .notice') && !!document.querySelector('app-montage-editor .join.set')`, 60000);
     console.log('montage restored after reload: 3 clips, transition kept');
+
+    // Reverse the whole montage (nothing selected): order flips, every clip plays backwards.
+    await click(wc, '⇄ Реверс');
+    await waitFor(wc, `document.querySelectorAll('app-montage-editor .clip .rev').length === 3`, 5000);
+    await waitFor(wc, `document.querySelectorAll('app-montage-editor video[data-key^="rev:"]').length === 2`, 120000);
+    const firstLabel = await wc.executeJavaScript(`document.querySelector('app-montage-editor .clip .src').innerText`);
+    if (firstLabel !== 'smoke_second.mp4') throw new Error('reverse did not flip the order: ' + firstLabel);
+    await key('Home');
+    await waitFor(wc, `document.querySelector('app-montage-editor video.active')?.dataset.key?.startsWith('rev:')`, 10000);
+    await key(' ');
+    await sleep(1200);
+    await key(' ');
+    await waitFor(wc, `document.querySelector('app-montage-editor video.active').paused && document.querySelector('app-montage-editor .play').innerText.trim() === '▶'`, 5000);
+    console.log('reversed montage plays from the backwards copy:', await wc.executeJavaScript(`document.querySelector('app-montage-editor .tc').innerText`));
+    await shot(win, '2e-reversed.png');
+    await clickExact(wc, 'Без потерь (MKV)');
+    await click(wc, 'Смонтировать');
+    await waitFor(wc, `document.querySelector('app-montage-editor .done code')?.innerText.endsWith('.mkv')`, 180000);
+    const reversedName = await wc.executeJavaScript(`document.querySelector('app-montage-editor .done code').innerText`);
+    console.log('reversed montage result', reversedName);
+    montageFiles.push(path.join(path.dirname(path.resolve(clip)), reversedName));
     await click(wc, 'Настройки');
 
     // Fast engine so everything finishes quickly without a GPU.

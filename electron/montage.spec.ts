@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { type MontageClip, setTransition } from '../shared/montage';
+import { type MontageClip, reverseMontage, setTransition } from '../shared/montage';
 import type { VideoInfo } from '../shared/types';
 import { analyze } from './analyze';
 import { fitSize, montageArgs, montageOutput, needsConversion, renderMontage, thumbnailsFor } from './montage';
+import { REVERSE_CHUNK, reverseChunks, reversedProxyFor } from './reverse';
 import { tools } from './tools';
 
 const hasFfmpeg = !!tools(true).ffmpeg && !!tools().ffprobe;
@@ -119,6 +120,41 @@ describe.skipIf(!hasFfmpeg)('renderMontage', () => {
     expect(p.video.codec_name).toBe('h264');
     expect(p.audio?.codec_name).toBe('aac');
     expect(frameHashes(out)).toHaveLength(50);
+  });
+
+  it('plays clips backwards: chunked, frame-exact, sound reversed too', async () => {
+    const prog: VideoInfo = { ...a, interlace: 'progressive' }; // compare bit for bit (see above)
+    expect(reverseChunks(0, 150, 64)).toEqual([{ from: 86, to: 150 }, { from: 22, to: 86 }, { from: 0, to: 22 }]);
+    expect(a.frames).toBeGreaterThan(REVERSE_CHUNK); // more than one chunk, across the dropped frame
+    const clips: MontageClip[] = [{ id: 'w', source: a.path, fps: a.fps, start: 0, end: a.frames, reversed: true }];
+    const out = path.join(dir, 'reversed.mkv');
+    const updates: number[] = [];
+    await renderMontage(prog, new Map([[a.path, prog]]), clips, out, { format: 'lossless' }, signal(), (p) => updates.push(p.percent));
+    expect(frameHashes(out)).toEqual([...sourceA].reverse());
+    const p = probe(out);
+    expect(p.audio?.codec_name).toBe('flac');
+    expect(Math.abs(p.duration - a.frames / a.fps)).toBeLessThan(0.1);
+    expect(updates.at(-1)).toBe(100);
+  });
+
+  it('reverses a whole montage with a transition', async () => {
+    const prog: VideoInfo = { ...a, interlace: 'progressive' };
+    const forward = setTransition([clipA(0, 30, 'x'), clipA(40, 70, 'y')], 'y', { kind: 'fade', frames: 5 });
+    const out = path.join(dir, 'reversed-montage.mkv');
+    await renderMontage(prog, new Map([[a.path, prog]]), reverseMontage(forward), out, { format: 'lossless' }, signal(), () => undefined);
+    const frames = frameHashes(out);
+    expect(frames).toHaveLength(30 + 30 - 5);
+    // y backwards (69..40), crossfade, x backwards (29..0): untouched parts are exact.
+    expect(frames.slice(0, 25)).toEqual(sourceA.slice(45, 70).reverse());
+    expect(frames.slice(30)).toEqual(sourceA.slice(0, 25).reverse());
+  });
+
+  it('makes a reversed playable copy for the player, same number of frames', async () => {
+    const file = await reversedProxyFor(a, path.join(dir, 'proxies'));
+    const p = probe(file);
+    expect(p.video.codec_name).toBe('h264');
+    expect(frameHashes(file)).toHaveLength(a.frames);
+    expect(await reversedProxyFor(a, path.join(dir, 'proxies'))).toBe(file); // cached
   });
 
   it('refuses an empty or out-of-range montage', async () => {

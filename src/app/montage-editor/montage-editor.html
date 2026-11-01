@@ -6,14 +6,15 @@
 }
 
 <div class="player">
-  @for (s of usedSources(); track s.path) {
-    @if (s.proxy) {
-      <video #video [attr.data-src]="s.path" [src]="s.proxy" preload="auto" [class.active]="s.path === activeSource()"
-             (play)="onPlay()" (pause)="onPause($event)" (click)="togglePlay()"></video>
-    }
+  @for (p of players(); track p.key) {
+    <video #video [attr.data-key]="p.key" [src]="p.src" preload="auto" [class.active]="p.key === activePlayer()"
+           (play)="onPlay()" (pause)="onPause($event)" (click)="togglePlay()"></video>
   }
   @if (!anyProxy()) {
     <div class="placeholder">Готовлю видео для просмотра…</div>
+  }
+  @if (reversePending()) {
+    <span class="badge right">готовлю обратное воспроизведение…</span>
   }
   @if (overlay(); as o) {
     <div class="fade" [style.opacity]="o.black"></div>
@@ -30,6 +31,9 @@
     <span class="sep"></span>
     <button type="button" class="icon" (click)="split()" [disabled]="!canSplit() || busy()" title="Разрезать по бегунку (S)">✂</button>
     <button type="button" class="icon" (click)="remove()" [disabled]="!selected() || busy()" title="Удалить клип (Delete)">🗑</button>
+    <button type="button" class="btn small ghost reverse" (click)="reverse()" [disabled]="!total() || busy()"
+            [class.on]="selected()?.reversed"
+            [title]="selected() ? 'Проиграть выбранный клип задом наперёд (R). Ещё раз — вернуть' : 'Проиграть весь монтаж задом наперёд: клипы в обратном порядке, каждый с конца (R)'">⇄ Реверс</button>
     <div class="menu-wrap">
       <button type="button" class="btn small ghost" (click)="addMenu.set(!addMenu())" [disabled]="busy()"
               title="Добавить видео после выбранного клипа (или в конец)">{{ state().adding ? 'Добавляю…' : '+ Видео' }}</button>
@@ -79,6 +83,9 @@
           }
           @if (multiSource()) {
             <span class="src">{{ v.label }}</span>
+          }
+          @if (v.clip.reversed) {
+            <span class="rev" title="Играет задом наперёд">⇄</span>
           }
           @if (v.clip.id === selectedId()) {
             <span class="handle left" (pointerdown)="trimStart(v, 'start', $event)" title="Потяните, чтобы обрезать начало"></span>
@@ -139,7 +146,7 @@
           title="Удалить кадры клипа после бегунка">Обрезать после бегунка ⇥</button>
 </div>
 <p class="hint">
-  S — разрезать, Delete — удалить клип, Ctrl+Z / Ctrl+Y — отменить / повторить (до 5 шагов), ← → — по кадру,
+  S — разрезать, Delete — удалить клип, R — реверс (выбранного клипа или всего монтажа), Ctrl+Z / Ctrl+Y — отменить / повторить (до 5 шагов), ← → — по кадру,
   Shift+← → — по секунде, пробел — играть. Края выбранного клипа можно тянуть мышью. Монтаж сохраняется сам.
   @if (multiSource() && owner(); as o) {
     Формат ролика задаёт {{ state().name }} ({{ o.width }}×{{ o.height }}, {{ o.fpsText }} к/с): другие видео приводятся к нему, при другой форме кадра — с полями.
