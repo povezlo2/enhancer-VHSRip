@@ -93,6 +93,7 @@ function createMock(): EnhancerApi {
       return [96, 151, 301, 390];
     },
     proxy: async () => '',
+    reversedProxy: async () => '',
     thumbnails: async () => ({ interval: 1, files: [] }),
     renderMontage: async (req) => {
       for (let i = 0; i <= 100; i += 25) {

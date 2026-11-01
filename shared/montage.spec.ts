@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { createHistory, record, redo, undo } from './history';
 import {
   clipLength, insertClips, layout, locate, type MontageClip, montageFrames, montageSources, moveClip, removeClips,
-  setAllTransitions, setTransition, sourceFrameAt, splitClip, transitionFrames, trimClip, validMontage, wholeSource,
+  reverseClips, reverseMontage, setAllTransitions, setTransition, sourceEdge, sourceFrameAt, splitClip, transitionFrames,
+  trimClip, validMontage, wholeSource,
 } from './montage';
 
 const FPS = 25;
@@ -120,5 +121,49 @@ describe('history (5 steps each way)', () => {
     h = record(undo(h), 'x');
     expect(h).toEqual({ past: ['a', 'b'], present: 'x', future: [] });
     expect(redo(h)).toBe(h);
+  });
+});
+
+describe('reverse', () => {
+  const r = (start: number, end: number, id: string): MontageClip => ({ ...a(start, end, id), reversed: true });
+
+  it('plays a reversed clip from its last frame down', () => {
+    const m = [r(10, 20, 'x')];
+    expect(sourceFrameAt(m, FPS, 0)).toEqual({ index: 0, frame: 19 });
+    expect(sourceFrameAt(m, FPS, 9)).toEqual({ index: 0, frame: 10 });
+  });
+
+  it('splits a reversed clip so both halves keep playing backwards', () => {
+    const m = splitClip([r(10, 20, 'x')], FPS, 3, 'y');
+    expect(m).toEqual([r(17, 20, 'x'), r(10, 17, 'y')]);
+    // What plays is unchanged by the split: 19, 18, 17 | 16 ... 10.
+    expect([0, 2, 3, 9].map((f) => sourceFrameAt(m, FPS, f).frame)).toEqual([19, 17, 16, 10]);
+  });
+
+  it('maps timeline edges to source edges', () => {
+    expect(sourceEdge(r(0, 5, 'x'), 'start')).toBe('end');
+    expect(sourceEdge(a(0, 5, 'x'), 'start')).toBe('start');
+  });
+
+  it('toggles clips', () => {
+    const m = reverseClips([a(0, 5, 'x'), a(5, 9, 'y')], ['y']);
+    expect(m[1].reversed).toBe(true);
+    expect(reverseClips(m, ['y'])[1].reversed).toBeUndefined();
+  });
+
+  it('reverses the whole montage: order, direction, joins keep their transitions', () => {
+    const fade = { kind: 'fade' as const, frames: 4 };
+    const m = setTransition([a(0, 10, 'x'), a(10, 20, 'y'), a(20, 30, 'z')], 'z', fade); // join y|z
+    const rev = reverseMontage(m);
+    expect(rev.map((c) => [c.id, c.reversed])).toEqual([['z', true], ['y', true], ['x', true]]);
+    expect(rev[1].transitionIn).toEqual(fade); // same join, now z|y
+    expect(rev[0].transitionIn).toBeUndefined();
+    expect(rev[2].transitionIn).toBeUndefined();
+    // Frame by frame, the result is the original played backwards.
+    const total = montageFrames(m, FPS);
+    expect(montageFrames(rev, FPS)).toBe(total);
+    expect(sourceFrameAt(rev, FPS, 0).frame).toBe(29);
+    expect(sourceFrameAt(rev, FPS, total - 1).frame).toBe(0);
+    expect(reverseMontage(rev)).toEqual(m);
   });
 });

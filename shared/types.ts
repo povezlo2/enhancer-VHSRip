@@ -253,6 +253,8 @@ export interface EnhancerApi {
   detectScenes(req: SceneRequest): Promise<number[]>;
   /** Small H.264 copy of the source that the browser can play (AVI/XviD often cannot). */
   proxy(path: string): Promise<string>;
+  /** The whole video played backwards, as a small playable copy (for reversed montage clips). */
+  reversedProxy(path: string): Promise<string>;
   /** Timeline thumbnails for the montage editor. */
   thumbnails(path: string): Promise<Thumbnails>;
   /** Cut and join clips into a lossless MKV; resolves with its path. */

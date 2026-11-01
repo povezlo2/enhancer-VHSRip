@@ -31,6 +31,8 @@ export interface MontageClip {
   end: number;
   /** Transition from the previous clip into this one. */
   transitionIn?: Transition;
+  /** Played backwards: from source frame end - 1 down to start (sound too). */
+  reversed?: boolean;
 }
 
 /** Frames of the source used by the clip. */
@@ -111,9 +113,15 @@ export function locate(clips: MontageClip[], fps: number, frame: number): { inde
   return { index: last, offset: lengths[last] };
 }
 
-/** Project-frame offset inside a clip -> frame of its source. */
+/** Project-frame offset inside a clip -> how many source frames in (counted in playing order). */
+function sourceOffset(c: MontageClip, offset: number, fps: number): number {
+  return sameRate(c.fps, fps) ? offset : Math.round((offset * c.fps) / fps);
+}
+
+/** Project-frame offset inside a clip -> frame of its source (a reversed clip counts down from the end). */
 export function sourceFrameOf(c: MontageClip, offset: number, fps: number): number {
-  const f = c.start + (sameRate(c.fps, fps) ? offset : Math.round((offset * c.fps) / fps));
+  const k = sourceOffset(c, offset, fps);
+  const f = c.reversed ? c.end - 1 - k : c.start + k;
   return Math.min(c.end - 1, Math.max(c.start, f));
 }
 
@@ -143,11 +151,18 @@ export function splitClip(clips: MontageClip[], fps: number, frame: number, id =
   const { index, offset } = locate(clips, fps, frame);
   const c = clips[index];
   if (!c) return clips;
-  const cut = sourceFrameOf(c, offset, fps);
-  if (offset <= 0 || cut <= c.start || cut >= c.end) return clips;
+  const k = sourceOffset(c, offset, fps); // source frames played before the cut
+  if (offset <= 0 || k <= 0 || k >= sourceFrames(c)) return clips;
   const { transitionIn: _keepOnLeft, ...plain } = c;
   const out = clips.slice();
-  out.splice(index, 1, { ...c, end: cut }, { ...plain, id, start: cut });
+  if (c.reversed) {
+    // Played from the end: the left part is the end of the source range.
+    const cut = c.end - k;
+    out.splice(index, 1, { ...c, start: cut }, { ...plain, id, end: cut });
+  } else {
+    const cut = c.start + k;
+    out.splice(index, 1, { ...c, end: cut }, { ...plain, id, start: cut });
+  }
   return out;
 }
 
@@ -187,6 +202,41 @@ export function trimClip(
     if (c.id !== id) return c;
     if (edge === 'start') return { ...c, start: Math.min(c.end - 1, Math.max(0, f)) };
     return { ...c, end: Math.max(c.start + 1, Math.min(totalFrames, f)) };
+  });
+}
+
+/**
+ * Source edge under a timeline edge: the left edge of a reversed clip is the end of its
+ * source range (and the right edge its start).
+ */
+export function sourceEdge(c: MontageClip, edge: 'start' | 'end'): 'start' | 'end' {
+  return c.reversed ? (edge === 'start' ? 'end' : 'start') : edge;
+}
+
+/** Play the given clips backwards (or forwards again). */
+export function reverseClips(clips: MontageClip[], ids: Iterable<string>): MontageClip[] {
+  const flip = new Set(ids);
+  return clips.map((c) => {
+    if (!flip.has(c.id)) return c;
+    if (c.reversed) {
+      const { reversed: _off, ...rest } = c;
+      return rest;
+    }
+    return { ...c, reversed: true };
+  });
+}
+
+/**
+ * The whole montage backwards: clips in reverse order, each one played backwards. The join
+ * between two clips keeps its transition (it is the same join, crossed the other way).
+ */
+export function reverseMontage(clips: MontageClip[]): MontageClip[] {
+  const n = clips.length;
+  const flipped = reverseClips(clips, clips.map((c) => c.id)).reverse();
+  return flipped.map((c, j) => {
+    const { transitionIn: _old, ...rest } = c;
+    const join = j > 0 ? clips[n - j].transitionIn : undefined;
+    return join ? { ...rest, transitionIn: join } : rest;
   });
 }
 

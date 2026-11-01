@@ -12,6 +12,7 @@ import { serveFile } from './media';
 import { montageOutput, renderMontage, thumbnailsFor } from './montage';
 import { originalPreview, processClip, TMP_ROOT } from './pipeline';
 import { proxyFor } from './proxy';
+import { reversedProxyFor } from './reverse';
 import { JobQueue } from './queue';
 import { detectScenes } from './scenes';
 import { tools } from './tools';
@@ -172,6 +173,12 @@ function registerIpc() {
   ipcMain.handle('montage:cancel', () => {
     montageController?.abort();
     montageController = null;
+  });
+
+  ipcMain.handle('proxy:reversed', async (_e, file: string) => {
+    const proxy = await reversedProxyFor(await analyzeCached(file), proxiesDir());
+    allow(proxy);
+    return proxy;
   });
 
   ipcMain.handle('cache:info', () => cacheInfo());

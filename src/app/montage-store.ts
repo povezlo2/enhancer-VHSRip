@@ -13,6 +13,9 @@ export interface SourceMedia {
   /** media:// URL of the playable copy. */
   proxy?: string;
   thumbs?: { interval: number; urls: string[] };
+  /** media:// URL of the whole video played backwards (made when a clip of it is reversed). */
+  reversedProxy?: string;
+  reversedError?: string;
 }
 
 /** A montage, keyed by the path of the video it belongs to (its "owner"). */
@@ -89,6 +92,7 @@ export class MontageStore {
   private renderingOwner: string | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly pending = new Map<string, Promise<VideoInfo | undefined>>();
+  private readonly pendingReversed = new Set<string>();
 
   constructor() {
     this.api.onMontageProgress((p) => {
@@ -114,7 +118,26 @@ export class MontageStore {
     }
     if (info) this.sources.update((all) => ({ ...all, [owner]: { ...all[owner], info } }));
     for (const src of new Set([owner, ...montageSources(state.history.present)])) void this.ensureSource(src);
+    this.syncReversed(state.history.present);
     return state;
+  }
+
+  /** Make sure every source with a reversed clip has its backwards copy for the player. */
+  private syncReversed(clips: MontageClip[]) {
+    for (const src of new Set(clips.filter((c) => c.reversed).map((c) => c.source))) void this.ensureReversed(src);
+  }
+
+  private async ensureReversed(path: string) {
+    const known = this.sources()[path];
+    if (known?.reversedProxy || this.pendingReversed.has(path)) return;
+    this.pendingReversed.add(path);
+    try {
+      this.patchSource(path, { reversedProxy: this.api.mediaUrl(await this.api.reversedProxy(path)), reversedError: undefined });
+    } catch (err) {
+      this.patchSource(path, { reversedError: messageOf(err) });
+    } finally {
+      this.pendingReversed.delete(path);
+    }
   }
 
   /** Analysis, playable proxy and thumbnails of a source (fetched once; concurrent callers share the load). */
@@ -148,17 +171,23 @@ export class MontageStore {
 
   edit(owner: string, clips: MontageClip[]) {
     const m = this.states()[owner];
-    if (m) this.patch(owner, { history: record(m.history, clips), error: undefined, restored: false, savedAt: Date.now() });
+    if (!m) return;
+    this.patch(owner, { history: record(m.history, clips), error: undefined, restored: false, savedAt: Date.now() });
+    this.syncReversed(clips);
   }
 
   undo(owner: string) {
     const m = this.states()[owner];
-    if (m?.history.past.length) this.patch(owner, { history: undo(m.history), restored: false, savedAt: Date.now() });
+    if (!m?.history.past.length) return;
+    this.patch(owner, { history: undo(m.history), restored: false, savedAt: Date.now() });
+    this.syncReversed(this.states()[owner]!.history.present);
   }
 
   redo(owner: string) {
     const m = this.states()[owner];
-    if (m?.history.future.length) this.patch(owner, { history: redo(m.history), restored: false, savedAt: Date.now() });
+    if (!m?.history.future.length) return;
+    this.patch(owner, { history: redo(m.history), restored: false, savedAt: Date.now() });
+    this.syncReversed(this.states()[owner]!.history.present);
   }
 
   /** Append whole videos after clip `afterIndex` (default: at the end). */

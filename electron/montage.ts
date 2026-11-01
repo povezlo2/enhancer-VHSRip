@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { layout, type MontageClip, montageFrames, validMontage } from '../shared/montage';
 import type { MontageFormat, MontageProgress, Thumbnails, VideoInfo } from '../shared/types';
 import { frameCounter } from './fragment';
 import { runOk } from './proc';
+import { reversedInfo, reverseRange } from './reverse';
 import { requireTool } from './tools';
 
 /** Seconds decoded before a clip's first frame, so the keyframe seek always lands early. */
@@ -71,7 +73,7 @@ export function montageArgs(
     return info;
   });
   const converts = infos.map((i) => needsConversion(i, target));
-  const progressive = opts.format === 'mp4' || converts.some(Boolean);
+  const progressive = opts.format === 'mp4' || !!opts.progressive || converts.some(Boolean);
   const pixFmt = opts.format === 'mp4' ? 'yuv420p' : target.pixFmt;
   const hasAudio = infos.some((i) => !!i.audioCodec);
   const rate = target.audioSampleRate ?? infos.find((i) => i.audioSampleRate)?.audioSampleRate ?? 48000;
@@ -180,9 +182,15 @@ export interface MontageOptions {
   format: MontageFormat;
   /** H.264 CRF for MP4. */
   crf?: number;
+  /** Deinterlace everything (set when a reversed clip comes from an interlaced source). */
+  progressive?: boolean;
 }
 
-/** Render the montage. Written to a temp name first, so a cancelled render leaves nothing. */
+/**
+ * Render the montage. Reversed clips are first written backwards to lossless temp files (in
+ * chunks, see reverse.ts) and then joined like any other clip. Written to a temp name first,
+ * so a cancelled render leaves nothing.
+ */
 export async function renderMontage(
   target: VideoInfo, sources: Map<string, VideoInfo>, clips: MontageClip[], output: string, opts: MontageOptions,
   signal: AbortSignal, onProgress: (p: Omit<MontageProgress, 'output'>) => void,
@@ -191,27 +199,51 @@ export async function renderMontage(
   if (!validMontage(clips, lengths)) throw new Error('Монтаж пуст или выходит за пределы видео.');
   if (clips.length > MAX_CLIPS) throw new Error(`Слишком много клипов (${clips.length}), максимум ${MAX_CLIPS}.`);
   const total = montageFrames(clips, target.fps);
+  const backwards = clips.filter((c) => c.reversed).reduce((n, c) => n + c.end - c.start, 0);
+  const work = backwards ? mkdtempSync(path.join(os.tmpdir(), 'enhancer-reverse-')) : null;
   const ext = path.extname(output);
   const tmp = `${output}.part${ext}`;
   const started = Date.now();
+  // Progress over all frames written: reversed clips first, then the montage itself.
+  const report = (done: number) => {
+    const all = backwards + total;
+    const secs = (Date.now() - started) / 1000;
+    onProgress({
+      percent: Math.min(99, (done / all) * 100), framesDone: done, framesTotal: all,
+      etaSec: done > 5 ? Math.round((secs / done) * (all - done)) : undefined,
+    });
+  };
   mkdirSync(path.dirname(output), { recursive: true });
   try {
-    await runOk(requireTool('ffmpeg'), montageArgs(target, sources, clips, tmp, opts), {
+    const plan = new Map(sources);
+    const final: MontageClip[] = [];
+    let reversedDone = 0;
+    let progressive = !!opts.progressive;
+    for (const [i, c] of clips.entries()) {
+      if (!c.reversed) {
+        final.push(c);
+        continue;
+      }
+      const src = sources.get(c.source)!;
+      const file = path.join(work!, `reversed-${i}.mkv`);
+      const base = reversedDone;
+      await reverseRange(src, c.start, c.end, file, 'lossless', signal, (n) => report(base + n));
+      reversedDone += c.end - c.start;
+      plan.set(file, reversedInfo(src, file, c.end - c.start));
+      if (src.interlace === 'tff' || src.interlace === 'bff') progressive = true;
+      const { reversed: _done, ...rest } = c;
+      final.push({ ...rest, source: file, start: 0, end: c.end - c.start });
+    }
+    await runOk(requireTool('ffmpeg'), montageArgs(target, plan, final, tmp, { ...opts, progressive }), {
       signal,
-      onStdout: frameCounter((n) => {
-        const done = Math.min(n, total);
-        const secs = (Date.now() - started) / 1000;
-        onProgress({
-          percent: Math.min(99, (done / total) * 100), framesDone: done, framesTotal: total,
-          etaSec: done > 5 ? Math.round((secs / done) * (total - done)) : undefined,
-        });
-      }),
+      onStdout: frameCounter((n) => report(backwards + Math.min(n, total))),
     });
     renameSync(tmp, output);
   } finally {
     rmSync(tmp, { force: true });
+    if (work) rmSync(work, { recursive: true, force: true });
   }
-  onProgress({ percent: 100, framesDone: total, framesTotal: total });
+  onProgress({ percent: 100, framesDone: backwards + total, framesTotal: backwards + total });
 }
 
 /**

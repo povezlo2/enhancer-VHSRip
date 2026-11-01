@@ -19,6 +19,7 @@ const api: EnhancerApi = {
   cancelPreview: () => ipcRenderer.invoke('preview:cancel'),
   detectScenes: (req) => ipcRenderer.invoke('scenes', req),
   proxy: (path) => ipcRenderer.invoke('proxy', path),
+  reversedProxy: (path) => ipcRenderer.invoke('proxy:reversed', path),
   thumbnails: (path) => ipcRenderer.invoke('thumbnails', path),
   renderMontage: (req) => ipcRenderer.invoke('montage:render', req),
   cancelMontage: () => ipcRenderer.invoke('montage:cancel'),

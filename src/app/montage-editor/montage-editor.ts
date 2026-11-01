@@ -2,8 +2,8 @@ import {
   ChangeDetectionStrategy, Component, computed, effect, ElementRef, input, OnDestroy, output, signal, untracked, viewChildren,
 } from '@angular/core';
 import {
-  layout, locate, type MontageClip, moveClip, removeClips, setAllTransitions, setTransition, sourceFrameAt, sourceFrameOf,
-  splitClip, type Transition, type TransitionKind, TRANSITIONS, trimClip,
+  layout, locate, type MontageClip, moveClip, removeClips, reverseClips, reverseMontage, setAllTransitions, setTransition,
+  sourceEdge, sourceFrameAt, sourceFrameOf, splitClip, type Transition, type TransitionKind, TRANSITIONS, trimClip,
 } from '../../../shared/montage';
 import type { MontageFormat } from '../../../shared/types';
 import type { MontageState, SourceMedia } from '../montage-store';
@@ -123,6 +123,21 @@ export class MontageEditor implements OnDestroy {
     const paths = [...new Set([this.state().owner, ...this.clips().map((c) => c.source)])];
     return paths.map((path, i) => ({ path, name: baseName(path), proxy: all[path]?.proxy ?? null, hue: (i * 67 + 265) % 360 }));
   });
+  /** One player per source and direction: forward copies, plus backwards copies where a clip is reversed. */
+  readonly players = computed(() => {
+    const all = this.sources();
+    const reversed = new Set(this.clips().filter((c) => c.reversed).map((c) => c.source));
+    return this.usedSources().flatMap((s) => [
+      ...(s.proxy ? [{ key: playerKey(s.path, false), src: s.proxy }] : []),
+      ...(reversed.has(s.path) && all[s.path]?.reversedProxy ? [{ key: playerKey(s.path, true), src: all[s.path]!.reversedProxy! }] : []),
+    ]);
+  });
+  /** A reversed clip whose backwards copy is still being made. */
+  readonly reversePending = computed(() => {
+    const all = this.sources();
+    return this.clips().some((c) => c.reversed && !all[c.source]?.reversedProxy && !all[c.source]?.reversedError);
+  });
+  readonly activePlayer = signal<string | null>(null);
   readonly multiSource = computed(() => new Set(this.clips().map((c) => c.source)).size > 1);
   readonly missing = computed(() => {
     const all = this.sources();
@@ -154,8 +169,8 @@ export class MontageEditor implements OnDestroy {
       const tiles: Tile[] = [];
       if (thumbs?.urls.length && width > 2) {
         for (let x = 0; x < width; x += tileW) {
-          // Timeline seconds map 1:1 to source seconds (frame-rate conversion keeps time).
-          const t = clip.start / clip.fps + x / pps;
+          // Timeline seconds map 1:1 to source seconds (frame-rate conversion keeps time); backwards for a reversed clip.
+          const t = clip.reversed ? Math.max(0, clip.end / clip.fps - (x + tileW) / pps) : clip.start / clip.fps + x / pps;
           tiles.push({ x, url: thumbs.urls[Math.min(thumbs.urls.length - 1, Math.floor(t / thumbs.interval))] });
         }
       }
@@ -214,10 +229,11 @@ export class MontageEditor implements OnDestroy {
       this.state().owner;
       untracked(() => queueMicrotask(() => this.fit()));
     });
-    // After an edit (or once players appear), keep the playhead inside the montage and the picture in sync.
+    // After an edit (or once players appear, e.g. a backwards copy), keep the playhead inside the montage
+    // and the picture in sync.
     effect(() => {
       const total = this.total();
-      this.anyProxy();
+      this.players();
       untracked(() => {
         if (!this.playing()) this.seek(Math.min(this.playhead(), Math.max(0, total - 1)));
       });
@@ -234,8 +250,27 @@ export class MontageEditor implements OnDestroy {
 
   // --- Playback -----------------------------------------------------------------------
 
-  private videoOf(source: string | null): HTMLVideoElement | undefined {
-    return this.videos().map((v) => v.nativeElement).find((v) => v.dataset['src'] === source);
+  private videoOf(key: string | null): HTMLVideoElement | undefined {
+    return this.videos().map((v) => v.nativeElement).find((v) => v.dataset['key'] === key);
+  }
+
+  /** Player for a clip, and the time in it that shows source frame `frame`. */
+  private playerFor(c: MontageClip, frame: number): { key: string; time: number } {
+    const backwards = c.reversed && this.videoOf(playerKey(c.source, true));
+    if (backwards) {
+      // The backwards copy holds the whole source reversed: source frame f is its frame N - 1 - f.
+      const n = this.sources()[c.source]?.info?.frames ?? c.end;
+      return { key: playerKey(c.source, true), time: (n - 1 - frame + 0.5) / c.fps };
+    }
+    return { key: playerKey(c.source, false), time: (frame + 0.5) / c.fps };
+  }
+
+  /** Source frame shown by a player at media time `t`. */
+  private frameIn(c: MontageClip, key: string, t: number): number {
+    const k = Math.round(t * c.fps);
+    if (key !== playerKey(c.source, true)) return k;
+    const n = this.sources()[c.source]?.info?.frames ?? c.end;
+    return n - 1 - k;
   }
 
   /** Show timeline frame `frame`: set the playhead, pick the source's player and seek it. */
@@ -249,19 +284,21 @@ export class MontageEditor implements OnDestroy {
     const c = clips[index];
     this.playIndex = index;
     this.activeSource.set(c.source);
-    const v = this.videoOf(c.source);
-    if (v) v.currentTime = (src + 0.5) / c.fps;
+    const p = this.playerFor(c, src);
+    this.activePlayer.set(p.key);
+    const v = this.videoOf(p.key);
+    if (v) v.currentTime = p.time;
   }
 
   togglePlay() {
-    const active = this.videoOf(this.activeSource());
+    const active = this.videoOf(this.activePlayer());
     if (active && !active.paused) {
       active.pause();
       return;
     }
     if (!this.total()) return;
     this.seek(this.playhead() >= this.total() - 1 ? 0 : this.playhead());
-    const v = this.videoOf(this.activeSource());
+    const v = this.videoOf(this.activePlayer());
     if (!v) return;
     void v.play();
     this.watchFrames(v);
@@ -272,7 +309,7 @@ export class MontageEditor implements OnDestroy {
   }
 
   onPause(e: Event) {
-    if (e.target !== this.videoOf(this.activeSource())) return; // a player we switched away from
+    if (e.target !== this.videoOf(this.activePlayer())) return; // a player we switched away from
     this.playing.set(false);
     this.stopWatching();
   }
@@ -293,11 +330,13 @@ export class MontageEditor implements OnDestroy {
       const i = this.playIndex;
       const c = clips[i];
       if (!c || v.paused) return;
-      const src = Math.round(meta.mediaTime * c.fps);
+      const src = this.frameIn(c, v.dataset['key'] ?? '', meta.mediaTime);
+      // Source frames played so far in this clip (a reversed clip plays from its end).
+      const played = c.reversed ? c.end - 1 - src : src - c.start;
       // This clip is shown until the middle of the transition into the next one.
       const endOffset = lengths[i] - Math.floor((trans[i + 1] ?? 0) / 2);
-      const endSrc = c.start + Math.round((endOffset * c.fps) / fps);
-      if (src >= endSrc - 1) {
+      const endPlayed = Math.round((endOffset * c.fps) / fps);
+      if (played >= endPlayed - 1) {
         const next = clips[i + 1];
         if (!next) {
           v.pause();
@@ -308,19 +347,21 @@ export class MontageEditor implements OnDestroy {
         const startOffset = Math.ceil(trans[i + 1] / 2);
         const nextSrc = sourceFrameOf(next, startOffset, fps);
         this.playhead.set(starts[i + 1] + startOffset);
-        const nv = this.videoOf(next.source);
+        const p = this.playerFor(next, nextSrc);
+        const nv = this.videoOf(p.key);
         if (!nv) return;
-        nv.currentTime = (nextSrc + 0.5) / next.fps;
+        nv.currentTime = p.time;
+        this.activeSource.set(next.source);
         if (nv !== v) {
-          // Different source: hand over to its player.
-          this.activeSource.set(next.source);
+          // Different source or direction: hand over to that player.
+          this.activePlayer.set(p.key);
           v.pause();
           void nv.play();
           this.watchFrames(nv);
           return;
         }
-      } else if (src >= c.start) {
-        this.playhead.set(starts[i] + Math.round(((src - c.start) * fps) / c.fps));
+      } else if (played >= 0) {
+        this.playhead.set(starts[i] + Math.round((played * fps) / c.fps));
       }
       this.frameCb = v.requestVideoFrameCallback(tick);
     };
@@ -329,7 +370,7 @@ export class MontageEditor implements OnDestroy {
   }
 
   private pause() {
-    this.videoOf(this.activeSource())?.pause();
+    this.videoOf(this.activePlayer())?.pause();
   }
 
   step(frames: number) {
@@ -393,20 +434,23 @@ export class MontageEditor implements OnDestroy {
     this.selectedId.set(view.clip.id);
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
+    // A reversed clip's left edge is the end of its source range, and dragging moves it the other way.
+    const srcEdge = sourceEdge(view.clip, edge);
+    const sign = view.clip.reversed ? -1 : 1;
     this.drag = {
-      id: view.clip.id, edge, x0: e.clientX, base: this.clips(), fps: view.clip.fps,
-      frame0: edge === 'start' ? view.clip.start : view.clip.end,
+      id: view.clip.id, edge: srcEdge, x0: e.clientX, base: this.clips(), fps: view.clip.fps,
+      frame0: srcEdge === 'start' ? view.clip.start : view.clip.end,
     };
     const total = this.sources()[view.clip.source]?.info?.frames ?? view.clip.end;
     const move = (ev: PointerEvent) => {
       const d = this.drag;
       if (!d) return;
-      const delta = Math.round(((ev.clientX - d.x0) / this.pps()) * d.fps);
+      const delta = sign * Math.round(((ev.clientX - d.x0) / this.pps()) * d.fps);
       const next = trimClip(d.base, d.id, d.edge, d.frame0 + delta, total);
       this.draft.set(next);
       const i = next.findIndex((c) => c.id === d.id);
       const lay = layout(next, this.fps());
-      this.seek(d.edge === 'start' ? lay.starts[i] : lay.starts[i] + lay.lengths[i] - 1);
+      this.seek(edge === 'start' ? lay.starts[i] : lay.starts[i] + lay.lengths[i] - 1);
     };
     const up = () => {
       target.removeEventListener('pointermove', move);
@@ -441,6 +485,20 @@ export class MontageEditor implements OnDestroy {
     queueMicrotask(() => this.seek(k >= 0 ? layout(next, this.fps()).starts[k] : 0));
   }
 
+  /** Reverse the selected clip, or the whole montage when nothing is selected. */
+  reverse() {
+    const sel = this.selected();
+    this.pause();
+    if (sel) {
+      this.edit.emit(reverseClips(this.clips(), [sel.id]));
+      return;
+    }
+    // Whole montage: the frame under the playhead stays under it, mirrored.
+    const mirrored = Math.max(0, this.total() - 1 - this.playhead());
+    this.edit.emit(reverseMontage(this.clips()));
+    queueMicrotask(() => this.seek(mirrored));
+  }
+
   move(delta: number) {
     const sel = this.selected();
     if (sel) this.edit.emit(moveClip(this.clips(), sel.id, delta));
@@ -454,8 +512,10 @@ export class MontageEditor implements OnDestroy {
     const c = clips[index];
     const src = sourceFrameOf(c, offset, this.fps());
     const total = this.sources()[c.source]?.info?.frames ?? c.end;
+    // Keep the frame under the playhead; for a reversed clip "before" is the end of its source range.
+    const srcEdge = sourceEdge(c, edge);
     this.selectedId.set(c.id);
-    this.edit.emit(trimClip(clips, c.id, edge, edge === 'start' ? src : src + 1, total));
+    this.edit.emit(trimClip(clips, c.id, srcEdge, srcEdge === 'start' ? src : src + 1, total));
   }
 
   setJoin(kind: TransitionKind | null, seconds?: number) {
@@ -505,6 +565,7 @@ export class MontageEditor implements OnDestroy {
     else if (ctrl && (key === 'y' || (key === 'z' && e.shiftKey))) this.redo.emit();
     else if (ctrl) handled = false;
     else if (key === 's') this.split();
+    else if (key === 'r') this.reverse();
     else if (key === 'delete' || key === 'backspace') this.remove();
     else if (key === ' ' && tag !== 'BUTTON') this.togglePlay();
     else if (key === 'arrowleft') this.step(e.shiftKey ? -Math.round(this.fps()) : -1);
@@ -529,6 +590,8 @@ export class MontageEditor implements OnDestroy {
     return new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   }
 }
+
+const playerKey = (source: string, reversed: boolean) => `${reversed ? 'rev' : 'fwd'}:${source}`;
 
 /** 75.4 -> "1:15" (or "1:15.40" with fractions). */
 function clock(sec: number, fraction = false): string {

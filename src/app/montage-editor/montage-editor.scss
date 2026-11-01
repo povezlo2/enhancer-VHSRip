@@ -491,3 +491,32 @@
     font-size: 12.5px;
   }
 }
+
+/* --- Reverse ------------------------------------------------------------------------- */
+
+.player .badge.right {
+  left: auto;
+  right: 10px;
+  color: var(--text-dim);
+}
+
+.reverse {
+  margin-left: 4px;
+
+  &.on {
+    border-color: #8b5cf6;
+    color: #c4b5fd;
+  }
+}
+
+.clip .rev {
+  position: absolute;
+  top: 2px;
+  right: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(76, 29, 149, 0.85);
+  color: #fff;
+  font-size: 11px;
+  pointer-events: none;
+}
