@@ -13,6 +13,11 @@
   @if (!anyProxy()) {
     <div class="placeholder">Готовлю видео для просмотра…</div>
   }
+  @for (o of state().overlays; track o.id) {
+    @if (audioUrls()[o.path]; as url) {
+      <audio #audio [attr.data-id]="o.id" [src]="url" preload="auto"></audio>
+    }
+  }
   @if (reversePending()) {
     <span class="badge right">готовлю обратное воспроизведение…</span>
   }
@@ -102,6 +107,15 @@
         <span class="empty">Все клипы удалены. Отмените действие (Ctrl+Z).</span>
       }
     </div>
+    <div class="alane" (pointerdown)="scrubStart($event)">
+      @for (o of overlays(); track o.id) {
+        <div class="aclip" [class.on]="o.id === selectedOverlayId()" [style.left.px]="o.left" [style.width.px]="o.width"
+             (pointerdown)="selectOverlay(o, $event)" [title]="o.name + ' · потяните, чтобы сдвинуть'">♪ {{ o.name }}</div>
+      }
+      @if (!overlays().length) {
+        <span class="alane-empty">♪ наложенного звука нет</span>
+      }
+    </div>
     <i class="playhead" [style.left.px]="playheadX()"></i>
   </div>
 </div>
@@ -154,6 +168,55 @@
 </p>
 @if (missing().length) {
   <p class="error">Нет доступа к файлам: {{ missing().join(', ') }}. Верните их на место или удалите эти клипы.</p>
+}
+
+<div class="sound">
+  <strong>Звук</strong>
+  <label class="field">
+    <span>Исходный</span>
+    <span class="seg">
+      @for (m of originalModes; track m.mode) {
+        <button type="button" [class.on]="state().originalAudio === m.mode" (click)="originalAudio.emit(m.mode)" [disabled]="busy()">{{ m.title }}</button>
+      }
+    </span>
+  </label>
+  <button type="button" class="btn small" (click)="addAudio.emit(playhead())" [disabled]="busy()"
+          title="Наложить звуковой файл (например, перевод), начиная с бегунка">+ Наложить аудио</button>
+  <span class="spacer"></span>
+  <span class="label">Извлечь звук:</span>
+  <button type="button" class="btn small ghost" (click)="extractAudio.emit('wav')" [disabled]="busy() || !total()"
+          title="Звук монтажа без потерь (WAV), как он будет звучать после сборки">WAV</button>
+  <button type="button" class="btn small ghost" (click)="extractAudio.emit('mp3')" [disabled]="busy() || !total()"
+          title="Звук монтажа в MP3: компактно, подходит для сервисов перевода">MP3</button>
+</div>
+@if (selectedOverlay(); as o) {
+  <div class="panel">
+    <strong>♪ {{ o.name }}</strong>
+    <span class="mono">с {{ time(o.start) }}, длина {{ o.duration.toFixed(1) }} с</span>
+    <button type="button" class="btn small ghost" (click)="nudgeOverlay(-0.1)" [disabled]="busy()">−0.1 с</button>
+    <button type="button" class="btn small ghost" (click)="nudgeOverlay(0.1)" [disabled]="busy()">+0.1 с</button>
+    <button type="button" class="btn small ghost" (click)="overlayToPlayhead()" [disabled]="busy()">Начать с бегунка</button>
+    <label class="field">
+      <span>Громкость</span>
+      <input type="range" min="0" max="2" step="0.05" [value]="o.volume" [disabled]="busy()"
+             (change)="overlayChange.emit({ id: o.id, volume: +$any($event.target).value })" />
+      <span class="mono">{{ (o.volume * 100).toFixed(0) }}%</span>
+    </label>
+    <button type="button" class="link small" (click)="deleteOverlay()" [disabled]="busy()">Удалить</button>
+  </div>
+}
+@if (extracting()) {
+  <div class="render">
+    <div class="progress"><i [style.width.%]="state().progress?.percent ?? 0"></i></div>
+    <span class="mono">Извлекаю звук… {{ (state().progress?.percent ?? 0).toFixed(0) }}%</span>
+    <button type="button" class="btn small" (click)="cancelRender.emit()">Отменить</button>
+  </div>
+}
+@if (!extracting() && state().extracted; as file) {
+  <div class="done">
+    <span>Звук сохранён: <code>{{ fileName(file) }}</code>. Переведите его и наложьте обратно кнопкой «+ Наложить аудио».</span>
+    <button type="button" class="btn small" (click)="showFile.emit(file)">Показать в папке</button>
+  </div>
 }
 
 <div class="render">

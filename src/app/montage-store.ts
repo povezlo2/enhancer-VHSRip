@@ -1,9 +1,9 @@
 import { effect, inject, Injectable, signal, computed } from '@angular/core';
 import { createHistory, type History, record, redo, undo } from '../../shared/history';
 import {
-  insertClips, type MontageClip, montageFrames, montageSources, wholeSource,
+  type AudioOverlay, insertClips, type MontageClip, montageFrames, montageSources, newClipId, type OriginalAudio, wholeSource,
 } from '../../shared/montage';
-import type { MontageFormat, MontageProgress, VideoInfo } from '../../shared/types';
+import type { AudioExportFormat, MontageFormat, MontageProgress, VideoInfo } from '../../shared/types';
 import { Store } from './store';
 
 /** Everything the montage editor needs about one source file. */
@@ -27,6 +27,10 @@ export interface MontageState {
   history: History<MontageClip[]>;
   format: MontageFormat;
   crf: number;
+  /** Audio files laid over the montage (e.g. a translated voice). */
+  overlays: AudioOverlay[];
+  /** The montage's own sound under them. */
+  originalAudio: OriginalAudio;
   /** Last edit, ms since epoch; unset until the montage is first changed. */
   savedAt?: number;
   /** Loaded from a previous run and not edited since. */
@@ -38,9 +42,18 @@ export interface MontageState {
   /** Queue entry created from the last render. */
   resultId?: string;
   resultName?: string;
+  extracting?: boolean;
+  /** Path of the last extracted sound file. */
+  extracted?: string;
 }
 
-type Saved = Pick<MontageState, 'owner' | 'name' | 'fps' | 'history' | 'format' | 'crf' | 'savedAt'>;
+type Saved = Pick<MontageState, 'owner' | 'name' | 'fps' | 'history' | 'format' | 'crf' | 'savedAt' | 'overlays' | 'originalAudio'>;
+
+function isOverlay(o: unknown): o is AudioOverlay {
+  const x = o as AudioOverlay;
+  return !!x && typeof x.id === 'string' && typeof x.path === 'string' && Number.isInteger(x.start) && x.start >= 0
+    && x.duration > 0 && x.volume >= 0 && x.volume <= 2;
+}
 
 const STORAGE_KEY = 'enhancer.montages.v2';
 /** Montages kept between runs (most recently edited). */
@@ -66,6 +79,8 @@ function loadSaved(): Record<string, MontageState> {
         owner: s.owner, name: s.name || baseName(s.owner), fps: s.fps,
         history: { past: h.past ?? [], present: h.present, future: h.future ?? [] },
         format: s.format === 'mp4' ? 'mp4' : 'lossless', crf: s.crf || 18, savedAt: s.savedAt, restored: true,
+        overlays: Array.isArray(s.overlays) ? s.overlays.filter(isOverlay) : [],
+        originalAudio: s.originalAudio === 'duck' || s.originalAudio === 'mute' ? s.originalAudio : 'keep',
       };
     }
     return out;
@@ -84,6 +99,8 @@ export class MontageStore {
   private readonly api = this.store.api;
 
   readonly sources = signal<Record<string, SourceMedia>>({});
+  /** media:// URLs of overlay audio files, for the player (made once per file per run). */
+  readonly audioUrls = signal<Record<string, string>>({});
   readonly states = signal<Record<string, MontageState>>(loadSaved());
   /** Saved montages, newest first, for the start screen. */
   readonly recent = computed(() =>
@@ -111,7 +128,7 @@ export class MontageStore {
     if (!state) {
       if (!info) return null;
       state = {
-        owner, name: baseName(owner), fps: info.fps, format: 'lossless', crf: 18,
+        owner, name: baseName(owner), fps: info.fps, format: 'lossless', crf: 18, overlays: [], originalAudio: 'keep',
         history: createHistory([wholeSource(owner, info.fps, info.frames)]),
       };
       this.states.update((all) => ({ ...all, [owner]: state! }));
@@ -119,7 +136,90 @@ export class MontageStore {
     if (info) this.sources.update((all) => ({ ...all, [owner]: { ...all[owner], info } }));
     for (const src of new Set([owner, ...montageSources(state.history.present)])) void this.ensureSource(src);
     this.syncReversed(state.history.present);
+    for (const o of state.overlays) void this.ensureAudio(o.path);
     return state;
+  }
+
+  /** Probe an audio file once per run: it also lets the player load it. */
+  private async ensureAudio(path: string) {
+    if (this.audioUrls()[path]) return;
+    try {
+      await this.api.probeAudio(path);
+      this.audioUrls.update((all) => ({ ...all, [path]: this.api.mediaUrl(path) }));
+    } catch {
+      /* missing file: render reports it */
+    }
+  }
+
+  // --- Sound ----------------------------------------------------------------------------
+
+  /** Lay audio files over the montage, starting at timeline frame `start`. */
+  async addAudio(owner: string, start: number) {
+    const m = this.states()[owner];
+    if (!m) return;
+    try {
+      const added: AudioOverlay[] = [];
+      for (const p of await this.api.openAudio()) {
+        const info = await this.api.probeAudio(p);
+        this.audioUrls.update((all) => ({ ...all, [p]: this.api.mediaUrl(p) }));
+        added.push({ id: newClipId(), path: p, name: info.name, start: Math.max(0, Math.round(start)), duration: info.duration, volume: 1 });
+      }
+      if (added.length) {
+        // A translated voice usually replaces the original: turn it down unless already chosen.
+        const originalAudio = m.overlays.length ? m.originalAudio : (m.originalAudio === 'keep' ? 'duck' : m.originalAudio);
+        this.patch(owner, { overlays: [...this.states()[owner]!.overlays, ...added], originalAudio, ...this.touched() });
+      }
+    } catch (err) {
+      this.patch(owner, { error: messageOf(err) });
+    }
+  }
+
+  updateOverlay(owner: string, id: string, patch: Partial<Pick<AudioOverlay, 'start' | 'volume'>>) {
+    const m = this.states()[owner];
+    if (!m) return;
+    const overlays = m.overlays.map((o) => (o.id === id ? {
+      ...o,
+      ...(patch.start !== undefined ? { start: Math.max(0, Math.round(patch.start)) } : {}),
+      ...(patch.volume !== undefined ? { volume: Math.min(2, Math.max(0, patch.volume)) } : {}),
+    } : o));
+    this.patch(owner, { overlays, ...this.touched() });
+  }
+
+  removeOverlay(owner: string, id: string) {
+    const m = this.states()[owner];
+    if (m) this.patch(owner, { overlays: m.overlays.filter((o) => o.id !== id), ...this.touched() });
+  }
+
+  setOriginalAudio(owner: string, mode: OriginalAudio) {
+    this.patch(owner, { originalAudio: mode, ...this.touched() });
+  }
+
+  /** Save the montage's sound (as it will be rendered) to WAV or MP3, e.g. to send it for translation. */
+  async extractAudio(owner: string, format: AudioExportFormat) {
+    const m = this.states()[owner];
+    if (!m || m.rendering || m.extracting || this.renderingOwner) return;
+    this.renderingOwner = owner;
+    this.patch(owner, { extracting: true, error: undefined, progress: { percent: 0 }, extracted: undefined });
+    try {
+      const file = await this.api.extractAudio(this.request(m), format);
+      this.patch(owner, { extracting: false, extracted: file, progress: undefined });
+    } catch (err) {
+      const msg = messageOf(err);
+      this.patch(owner, { extracting: false, progress: undefined, error: /cancel/i.test(msg) ? undefined : msg });
+    } finally {
+      this.renderingOwner = null;
+    }
+  }
+
+  private request(m: MontageState) {
+    return {
+      owner: m.owner, clips: m.history.present, format: m.format, crf: m.crf, outDir: this.store.outDir(),
+      overlays: m.overlays, originalAudio: m.originalAudio,
+    };
+  }
+
+  private touched(): Partial<MontageState> {
+    return { restored: false, savedAt: Date.now() };
   }
 
   /** Make sure every source with a reversed clip has its backwards copy for the player. */
@@ -233,7 +333,7 @@ export class MontageStore {
   /** Render, then add the result to the clip list below the others. */
   async render(owner: string) {
     const m = this.states()[owner];
-    if (!m || m.rendering || this.renderingOwner) return;
+    if (!m || m.rendering || m.extracting || this.renderingOwner) return;
     const missing = montageSources(m.history.present).filter((p) => !this.sources()[p]?.info);
     if (missing.length) {
       this.patch(owner, { error: `Нет доступа к файлам: ${missing.map(baseName).join(', ')}` });
@@ -242,9 +342,7 @@ export class MontageStore {
     this.renderingOwner = owner;
     this.patch(owner, { rendering: true, error: undefined, progress: { percent: 0 }, resultId: undefined, resultName: undefined });
     try {
-      const output = await this.api.renderMontage({
-        owner, clips: m.history.present, format: m.format, crf: m.crf, outDir: this.store.outDir(),
-      });
+      const output = await this.api.renderMontage(this.request(m));
       const [id] = this.store.addPaths([output]);
       if (id) this.store.markMontageResult(id, m.name);
       this.patch(owner, { rendering: false, resultId: id, resultName: baseName(output) });
@@ -279,7 +377,8 @@ export class MontageStore {
       .filter((s) => s.savedAt)
       .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0))
       .slice(0, KEEP)
-      .map(({ owner, name, fps, history, format, crf, savedAt }): Saved => ({ owner, name, fps, history, format, crf, savedAt }));
+      .map(({ owner, name, fps, history, format, crf, savedAt, overlays, originalAudio }): Saved =>
+        ({ owner, name, fps, history, format, crf, savedAt, overlays, originalAudio }));
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(Object.fromEntries(saved.map((s) => [s.owner, s]))));
     } catch {

@@ -155,6 +155,42 @@ app.whenReady().then(async () => {
     const reversedName = await wc.executeJavaScript(`document.querySelector('app-montage-editor .done code').innerText`);
     console.log('reversed montage result', reversedName);
     montageFiles.push(path.join(path.dirname(path.resolve(clip)), reversedName));
+
+    // Sound: extract it (for translation), lay a "translated" voice back over the picture.
+    await clickExact(wc, 'MP3');
+    await waitFor(wc, `document.body.innerText.includes('Звук сохранён')`, 120000);
+    const audioName = await wc.executeJavaScript(`[...document.querySelectorAll('app-montage-editor .done code')].map(c => c.innerText).find(n => n.includes('_audio'))`);
+    if (!audioName?.endsWith('_audio.mp3')) throw new Error('unexpected extracted sound: ' + audioName);
+    montageFiles.push(path.join(path.dirname(path.resolve(clip)), audioName));
+    console.log('sound extracted', audioName);
+    const voice = path.join(outDir, 'smoke_voice.wav');
+    const madeVoice = require('node:child_process').spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'lavfi', '-i', 'sine=f=660:d=3', voice]);
+    if (madeVoice.status !== 0) throw new Error('could not create the test voice track');
+    await key('Home');
+    nextPick.push(voice);
+    await click(wc, '+ Наложить аудио');
+    await waitFor(wc, `!!document.querySelector('app-montage-editor .aclip') && !!document.querySelector('app-montage-editor audio')`, 15000);
+    // The first overlay turns the original down.
+    await waitFor(wc, `[...document.querySelectorAll('app-montage-editor .sound .seg button')].find(b => b.classList.contains('on'))?.innerText.startsWith('Тише')`, 5000);
+    await wc.executeJavaScript(`(() => { const c = document.querySelector('app-montage-editor .aclip'); const r = c.getBoundingClientRect();
+      c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: r.left + 5, clientY: r.top + 5 }));
+      c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: r.left + 5, clientY: r.top + 5 })); })()`);
+    await click(wc, '+0.1 с');
+    await waitFor(wc, `document.querySelector('app-montage-editor .panel .mono')?.innerText.startsWith('с 0:00.12')`, 5000);
+    await key(' ');
+    await waitFor(wc, `!document.querySelector('app-montage-editor audio').paused`, 5000);
+    await sleep(500);
+    await key(' ');
+    await waitFor(wc, `document.querySelector('app-montage-editor audio').paused`, 5000);
+    console.log('overlay plays in sync with the picture');
+    await shot(win, '2f-sound.png');
+    await clickExact(wc, 'MP4');
+    await click(wc, 'Смонтировать');
+    await waitFor(wc, `[...document.querySelectorAll('app-montage-editor .done code')].some(c => c.innerText.endsWith('.mp4') && c.innerText.includes('(2)'))`, 180000);
+    const dubbedName = await wc.executeJavaScript(`[...document.querySelectorAll('app-montage-editor .done code')].map(c => c.innerText).find(n => n.includes('(2)'))`);
+    montageFiles.push(path.join(path.dirname(path.resolve(clip)), dubbedName));
+    console.log('dubbed montage', dubbedName);
     await click(wc, 'Настройки');
 
     // Fast engine so everything finishes quickly without a GPU.

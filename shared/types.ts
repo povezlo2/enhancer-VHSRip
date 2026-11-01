@@ -1,6 +1,6 @@
 // Types shared between the Electron main process and the Angular renderer.
 
-import type { MontageClip } from './montage';
+import type { AudioOverlay, MontageClip, OriginalAudio } from './montage';
 import type { Segment } from './segments';
 
 export type InterlaceKind = 'progressive' | 'tff' | 'bff' | 'unknown';
@@ -208,8 +208,23 @@ export interface MontageRequest {
   format: MontageFormat;
   /** H.264 CRF for MP4 (18 = high, 23 = smaller). */
   crf?: number;
+  /** Audio files laid over the montage. */
+  overlays?: AudioOverlay[];
+  /** The montage's own sound under the overlays. */
+  originalAudio?: OriginalAudio;
   /** Folder for the result; null = next to the owner video. */
   outDir: string | null;
+}
+
+/** wav: lossless PCM, mp3: compact; both accepted by translation and dubbing services. */
+export type AudioExportFormat = 'wav' | 'mp3';
+
+export interface AudioInfo {
+  path: string;
+  name: string;
+  /** Seconds. */
+  duration: number;
+  codec: string;
 }
 
 export interface MontageProgress {
@@ -260,6 +275,12 @@ export interface EnhancerApi {
   /** Cut and join clips into a lossless MKV; resolves with its path. */
   renderMontage(req: MontageRequest): Promise<string>;
   cancelMontage(): Promise<void>;
+  /** Save the montage's sound (cuts, transitions, reverse and overlays applied) to an audio file; resolves with its path. */
+  extractAudio(req: MontageRequest, format: AudioExportFormat): Promise<string>;
+  /** Pick audio files to lay over the montage. */
+  openAudio(): Promise<string[]>;
+  /** Length and codec of an audio file (also allows the player to load it). */
+  probeAudio(path: string): Promise<AudioInfo>;
   onMontageProgress(cb: (p: MontageProgress) => void): () => void;
   cacheInfo(): Promise<CacheInfo>;
   clearCache(): Promise<CacheInfo>;

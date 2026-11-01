@@ -269,3 +269,36 @@ export function validMontage(clips: MontageClip[], sourceLengths: Record<string,
 
 /** Distinct source files, in order of first use. */
 export const montageSources = (clips: MontageClip[]) => [...new Set(clips.map((c) => c.source))];
+
+// --- Sound -------------------------------------------------------------------------------
+
+/** An audio file laid over the montage (e.g. a translated voice track). */
+export interface AudioOverlay {
+  id: string;
+  path: string;
+  name: string;
+  /** Timeline frame (project fps) where the audio starts. */
+  start: number;
+  /** Length of the audio file, seconds. */
+  duration: number;
+  /** 0..2, 1 = as recorded. */
+  volume: number;
+}
+
+/** What happens to the montage's own sound under the overlays. */
+export type OriginalAudio = 'keep' | 'duck' | 'mute';
+
+export const ORIGINAL_AUDIO: { mode: OriginalAudio; title: string; volume: number }[] = [
+  { mode: 'keep', title: 'Оставить', volume: 1 },
+  { mode: 'duck', title: 'Тише (25%)', volume: 0.25 },
+  { mode: 'mute', title: 'Выключить', volume: 0 },
+];
+
+export const originalVolume = (mode: OriginalAudio | undefined) =>
+  ORIGINAL_AUDIO.find((o) => o.mode === mode)?.volume ?? 1;
+
+/** Overlays are valid: whole-frame start inside or at the end of the montage, sane volume and length. */
+export function validOverlays(overlays: AudioOverlay[], totalFrames: number): boolean {
+  return overlays.every((o) => typeof o.path === 'string' && o.path.length > 0 && Number.isInteger(o.start)
+    && o.start >= 0 && o.start <= totalFrames && o.duration > 0 && o.volume >= 0 && o.volume <= 2);
+}

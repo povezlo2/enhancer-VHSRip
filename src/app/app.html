@@ -155,12 +155,18 @@
         <div class="tab-body">
           @if (tab() === 'montage') {
             @if (montage.states()[c.path]; as m) {
-              <app-montage-editor [state]="m" [sources]="montage.sources()" [queue]="queueEntries()"
+              <app-montage-editor [state]="m" [sources]="montage.sources()" [queue]="queueEntries()" [audioUrls]="montage.audioUrls()"
                                   (edit)="editMontage($event)" (undo)="montage.undo(c.path)" (redo)="montage.redo(c.path)"
                                   (add)="addToMontage($event)" (restart)="montage.restart(c.path)"
                                   (outputFormat)="montage.setOutput(c.path, $event.format, $event.crf)"
                                   (render)="montage.render(c.path)" (cancelRender)="montage.cancelRender()"
-                                  (openResult)="selectClip($event)" />
+                                  (openResult)="selectClip($event)"
+                                  (addAudio)="montage.addAudio(c.path, $event)"
+                                  (overlayChange)="montage.updateOverlay(c.path, $event.id, $event)"
+                                  (removeOverlay)="montage.removeOverlay(c.path, $event)"
+                                  (originalAudio)="montage.setOriginalAudio(c.path, $event)"
+                                  (extractAudio)="montage.extractAudio(c.path, $event)"
+                                  (showFile)="store.api.showInFolder($event)" />
             }
           } @else if (tab() === 'settings') {
             <app-settings-panel [info]="info" [options]="c.options" [disabled]="selectedBusy()"

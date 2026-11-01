@@ -103,6 +103,9 @@ function createMock(): EnhancerApi {
       return req.owner.replace(/(\.[^.]+)?$/, req.format === 'mp4' ? '_montage.mp4' : '_montage.mkv');
     },
     cancelMontage: async () => undefined,
+    extractAudio: async (req, format) => req.owner.replace(/(\.[^.]+)?$/, `_audio.${format}`),
+    openAudio: async () => ['C:/Видео/перевод.mp3'],
+    probeAudio: async (path) => ({ path, name: path.split(/[\\/]/).pop() ?? path, duration: 12.5, codec: 'mp3' }),
     onMontageProgress: (cb) => {
       montageProgress.add(cb);
       return () => montageProgress.delete(cb);

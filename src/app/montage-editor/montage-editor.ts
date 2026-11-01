@@ -2,10 +2,10 @@ import {
   ChangeDetectionStrategy, Component, computed, effect, ElementRef, input, OnDestroy, output, signal, untracked, viewChildren,
 } from '@angular/core';
 import {
-  layout, locate, type MontageClip, moveClip, removeClips, reverseClips, reverseMontage, setAllTransitions, setTransition,
+  type AudioOverlay, layout, locate, type MontageClip, moveClip, ORIGINAL_AUDIO, type OriginalAudio, originalVolume, removeClips, reverseClips, reverseMontage, setAllTransitions, setTransition,
   sourceEdge, sourceFrameAt, sourceFrameOf, splitClip, type Transition, type TransitionKind, TRANSITIONS, trimClip,
 } from '../../../shared/montage';
-import type { MontageFormat } from '../../../shared/types';
+import type { AudioExportFormat, MontageFormat } from '../../../shared/types';
 import type { MontageState, SourceMedia } from '../montage-store';
 
 interface Tile {
@@ -71,6 +71,8 @@ export class MontageEditor implements OnDestroy {
   readonly sources = input.required<Record<string, SourceMedia>>();
   /** Videos in the clip list, offered in «+ Видео». */
   readonly queue = input<QueueEntry[]>([]);
+  /** Playable URLs of overlay audio files. */
+  readonly audioUrls = input<Record<string, string>>({});
 
   readonly edit = output<MontageClip[]>();
   readonly undo = output<void>();
@@ -81,6 +83,18 @@ export class MontageEditor implements OnDestroy {
   readonly render = output<void>();
   readonly cancelRender = output<void>();
   readonly openResult = output<string>();
+  readonly addAudio = output<number>();
+  readonly overlayChange = output<{ id: string; start?: number; volume?: number }>();
+  readonly removeOverlay = output<string>();
+  readonly originalAudio = output<OriginalAudio>();
+  readonly extractAudio = output<AudioExportFormat>();
+  readonly showFile = output<string>();
+
+  readonly originalModes = ORIGINAL_AUDIO;
+  readonly selectedOverlayId = signal<string | null>(null);
+  /** Start of the overlay being dragged (committed on release). */
+  private readonly overlayDraft = signal<{ id: string; start: number } | null>(null);
+  private readonly audios = viewChildren<ElementRef<HTMLAudioElement>>('audio');
 
   readonly transitions = TRANSITIONS;
   readonly transitionSeconds = TRANSITION_SECONDS;
@@ -115,7 +129,17 @@ export class MontageEditor implements OnDestroy {
   readonly selected = computed(() => this.clips().find((c) => c.id === this.selectedId()) ?? null);
   readonly selectedIndex = computed(() => this.clips().findIndex((c) => c.id === this.selectedId()));
   readonly rendering = computed(() => !!this.state().rendering);
-  readonly busy = computed(() => this.rendering() || !!this.state().adding);
+  readonly extracting = computed(() => !!this.state().extracting);
+  readonly busy = computed(() => this.rendering() || this.extracting() || !!this.state().adding);
+
+  readonly overlays = computed<(AudioOverlay & { left: number; width: number })[]>(() => {
+    const d = this.overlayDraft();
+    return this.state().overlays.map((o) => {
+      const start = d?.id === o.id ? d.start : o.start;
+      return { ...o, start, left: PAD + (start / this.fps()) * this.pps(), width: Math.max(4, o.duration * this.pps()) };
+    });
+  });
+  readonly selectedOverlay = computed(() => this.overlays().find((o) => o.id === this.selectedOverlayId()) ?? null);
 
   /** Sources in use, in order (one <video> each). */
   readonly usedSources = computed(() => {
@@ -225,6 +249,12 @@ export class MontageEditor implements OnDestroy {
   readonly playheadX = computed(() => PAD + (this.playhead() / this.fps()) * this.pps());
 
   constructor() {
+    // The montage's own sound in the player follows «Исходный звук».
+    effect(() => {
+      const volume = originalVolume(this.state().originalAudio);
+      this.players();
+      untracked(() => queueMicrotask(() => this.videos().forEach((v) => (v.nativeElement.volume = volume))));
+    });
     effect(() => {
       this.state().owner;
       untracked(() => queueMicrotask(() => this.fit()));
@@ -288,6 +318,28 @@ export class MontageEditor implements OnDestroy {
     this.activePlayer.set(p.key);
     const v = this.videoOf(p.key);
     if (v) v.currentTime = p.time;
+    if (!this.playing()) this.syncAudio(false);
+  }
+
+  /** Keep overlay audio in step with the playhead (re-seek only when it drifts noticeably). */
+  private syncAudio(playing: boolean) {
+    const sec = this.playhead() / this.fps();
+    const byId = new Map(this.state().overlays.map((o) => [o.id, o]));
+    for (const ref of this.audios()) {
+      const el = ref.nativeElement;
+      const o = byId.get(el.dataset['id'] ?? '');
+      if (!o) continue;
+      const t = sec - o.start / this.fps();
+      const inside = t >= 0 && t < o.duration;
+      el.volume = Math.min(1, o.volume); // the player cannot amplify; the render can (up to 200%)
+      if (playing && inside) {
+        if (Math.abs(el.currentTime - t) > 0.15) el.currentTime = t;
+        if (el.paused) void el.play();
+      } else {
+        if (!el.paused) el.pause();
+        if (inside) el.currentTime = t;
+      }
+    }
   }
 
   togglePlay() {
@@ -312,6 +364,7 @@ export class MontageEditor implements OnDestroy {
     if (e.target !== this.videoOf(this.activePlayer())) return; // a player we switched away from
     this.playing.set(false);
     this.stopWatching();
+    this.syncAudio(false);
   }
 
   private stopWatching() {
@@ -363,6 +416,7 @@ export class MontageEditor implements OnDestroy {
       } else if (played >= 0) {
         this.playhead.set(starts[i] + Math.round((played * fps) / c.fps));
       }
+      this.syncAudio(true);
       this.frameCb = v.requestVideoFrameCallback(tick);
     };
     this.frameCbVideo = v;
@@ -398,6 +452,7 @@ export class MontageEditor implements OnDestroy {
     if (e.button !== 0) return;
     this.pause();
     this.selectedJoin.set(null);
+    this.selectedOverlayId.set(null);
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     this.seek(this.frameAtX(e.clientX));
@@ -416,6 +471,7 @@ export class MontageEditor implements OnDestroy {
     this.pause();
     this.selectedId.set(view.clip.id);
     this.selectedJoin.set(null);
+    this.selectedOverlayId.set(null);
     this.seek(this.frameAtX(e.clientX));
   }
 
@@ -483,6 +539,51 @@ export class MontageEditor implements OnDestroy {
     this.selectedId.set(next[k]?.id ?? null);
     this.selectedJoin.set(null);
     queueMicrotask(() => this.seek(k >= 0 ? layout(next, this.fps()).starts[k] : 0));
+  }
+
+  // --- Sound ----------------------------------------------------------------------------
+
+  selectOverlay(o: AudioOverlay, e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    this.pause();
+    this.selectedOverlayId.set(o.id);
+    // Drag sideways to move it in time.
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+    const x0 = e.clientX;
+    const start0 = o.start;
+    const move = (ev: PointerEvent) => {
+      const delta = Math.round(((ev.clientX - x0) / this.pps()) * this.fps());
+      if (delta) this.overlayDraft.set({ id: o.id, start: Math.min(this.total(), Math.max(0, start0 + delta)) });
+    };
+    const up = () => {
+      target.removeEventListener('pointermove', move);
+      target.removeEventListener('pointerup', up);
+      const d = this.overlayDraft();
+      this.overlayDraft.set(null);
+      if (d && d.start !== start0) this.overlayChange.emit({ id: o.id, start: d.start });
+      this.syncAudio(false);
+    };
+    target.addEventListener('pointermove', move);
+    target.addEventListener('pointerup', up);
+  }
+
+  nudgeOverlay(seconds: number) {
+    const o = this.selectedOverlay();
+    if (o) this.overlayChange.emit({ id: o.id, start: Math.min(this.total(), Math.max(0, o.start + Math.round(seconds * this.fps()))) });
+  }
+
+  overlayToPlayhead() {
+    const o = this.selectedOverlay();
+    if (o) this.overlayChange.emit({ id: o.id, start: this.playhead() });
+  }
+
+  deleteOverlay() {
+    const o = this.selectedOverlay();
+    if (!o) return;
+    this.removeOverlay.emit(o.id);
+    this.selectedOverlayId.set(null);
   }
 
   /** Reverse the selected clip, or the whole montage when nothing is selected. */
@@ -582,6 +683,10 @@ export class MontageEditor implements OnDestroy {
   /** The offered length closest to `seconds` (frame rounding makes exact matches rare: 0.5 s at 25 fps is 0.52 s). */
   closestSeconds(seconds: number): number {
     return TRANSITION_SECONDS.reduce((best, s) => (Math.abs(s - seconds) < Math.abs(best - seconds) ? s : best));
+  }
+
+  fileName(p: string): string {
+    return baseName(p);
   }
 
   savedLabel(): string {

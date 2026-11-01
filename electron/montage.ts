@@ -2,8 +2,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { layout, type MontageClip, montageFrames, validMontage } from '../shared/montage';
-import type { MontageFormat, MontageProgress, Thumbnails, VideoInfo } from '../shared/types';
+import {
+  type AudioOverlay, layout, type MontageClip, montageFrames, type OriginalAudio, originalVolume, validMontage, validOverlays,
+} from '../shared/montage';
+import type { AudioExportFormat, MontageFormat, MontageProgress, Thumbnails, VideoInfo } from '../shared/types';
 import { frameCounter } from './fragment';
 import { runOk } from './proc';
 import { reversedInfo, reverseRange } from './reverse';
@@ -13,6 +15,26 @@ import { requireTool } from './tools';
 const SEEK_MARGIN = 1;
 /** One ffmpeg call opens a source once per clip; more than this is refused. */
 export const MAX_CLIPS = 300;
+
+/** Calls `onSeconds` with the latest `out_time_us=` from ffmpeg's -progress output. */
+export function timeCounter(onSeconds: (s: number) => void) {
+  let buf = '';
+  return (chunk: string) => {
+    buf = (buf + chunk).slice(-2000);
+    const all = [...buf.matchAll(/out_time_us=(\d+)/g)];
+    const last = all[all.length - 1];
+    if (last) onSeconds(Number(last[1]) / 1e6);
+  };
+}
+
+/** Extracted sound next to the owner video (or in `outDir`): name_audio.wav / .mp3, then (2), (3)... */
+export function audioOutput(src: string, outDir: string | null, format: AudioExportFormat): string {
+  const dir = outDir ?? path.dirname(src);
+  const base = path.parse(src).name;
+  let candidate = path.join(dir, `${base}_audio.${format}`);
+  for (let i = 2; existsSync(candidate); i++) candidate = path.join(dir, `${base}_audio (${i}).${format}`);
+  return candidate;
+}
 
 /** Output file next to the owner video (or in `outDir`): name_montage.mkv / .mp4, then (2), (3)... */
 export function montageOutput(src: string, outDir: string | null, format: MontageFormat = 'lossless'): string {
@@ -75,7 +97,11 @@ export function montageArgs(
   const converts = infos.map((i) => needsConversion(i, target));
   const progressive = opts.format === 'mp4' || !!opts.progressive || converts.some(Boolean);
   const pixFmt = opts.format === 'mp4' ? 'yuv420p' : target.pixFmt;
-  const hasAudio = infos.some((i) => !!i.audioCodec);
+  const audioOnly = opts.audioOnly;
+  const overlays = opts.overlays ?? [];
+  const clipAudio = infos.some((i) => !!i.audioCodec);
+  const hasAudio = clipAudio || overlays.length > 0;
+  if (audioOnly && !hasAudio) throw new Error('В монтаже нет звука: ни у одного клипа нет звуковой дорожки.');
   const rate = target.audioSampleRate ?? infos.find((i) => i.audioSampleRate)?.audioSampleRate ?? 48000;
   const channels = target.audioCodec ? (target.audioChannels ?? 2) : 2;
   const chLayout = channels === 1 ? 'mono' : 'stereo';
@@ -89,10 +115,12 @@ export function montageArgs(
     const len = lay.lengths[i];
     const ss = Math.max(0, at - SEEK_MARGIN);
     if (ss > 0) inputs.push('-ss', ss.toFixed(6));
-    inputs.push('-t', (at - ss + n / src.fps + 0.5).toFixed(6), '-i', src.path);
+    inputs.push('-t', (at - ss + n / src.fps + 0.5).toFixed(6), ...(audioOnly ? ['-vn'] : []), '-i', src.path);
     const t0 = src.startTime + at;
 
     const v = [`fps=fps=${src.fpsRational}:start_time=${t0.toFixed(6)}`, `trim=end_frame=${n}`];
+    const tin = lay.trans[i];
+    const tout = lay.trans[i + 1] ?? 0;
     if (progressive && interlaced(src)) v.push(`bwdif=mode=send_frame:parity=${src.interlace}`);
     if (converts[i]) {
       const [sn, sd] = rational(src.fpsRational);
@@ -109,20 +137,20 @@ export function montageArgs(
 
     // Split off the frames that overlap the neighbours: only those go through xfade (which
     // in FFmpeg 6.1 converts to 4:4:4 and back), so every other frame stays untouched.
-    const tin = lay.trans[i];
-    const tout = lay.trans[i + 1] ?? 0;
     const parts: { label: string; from: number; to: number }[] = [];
     if (tin) parts.push({ label: `h${i}`, from: 0, to: tin });
     parts.push({ label: `b${i}`, from: tin, to: len - tout });
     if (tout) parts.push({ label: `t${i}`, from: len - tout, to: len });
-    if (parts.length === 1) {
+    if (audioOnly) {
+      // Sound only: no picture is decoded.
+    } else if (parts.length === 1) {
       graph.push(`[${i}:v:0]${v.join(',')}[b${i}]`);
     } else {
       graph.push(`[${i}:v:0]${v.join(',')},split=${parts.length}${parts.map((p) => `[s${p.label}]`).join('')}`);
       for (const p of parts) graph.push(`[s${p.label}]trim=start_frame=${p.from}:end_frame=${p.to},setpts=N[${p.label}]`);
     }
 
-    if (hasAudio) {
+    if (clipAudio) {
       const dur = (len / fps).toFixed(6);
       if (src.audioCodec) {
         const t1 = t0 + n / src.fps;
@@ -136,7 +164,7 @@ export function montageArgs(
 
   // Video: body 0, transition 0->1, body 1, ... joined by one concat.
   const pieces: string[] = ['b0'];
-  for (let i = 1; i < clips.length; i++) {
+  for (let i = 1; i < clips.length && !audioOnly; i++) {
     if (lay.trans[i] > 0) {
       const kind = clips[i].transitionIn?.kind ?? 'fade';
       const dur = (lay.trans[i] / fps).toFixed(6);
@@ -146,12 +174,12 @@ export function montageArgs(
     pieces.push(`b${i}`);
   }
   let v = 'vout';
-  if (pieces.length === 1) v = pieces[0];
+  if (pieces.length === 1 || audioOnly) v = pieces[0];
   else graph.push(`${pieces.map((p) => `[${p}]`).join('')}concat=n=${pieces.length}:v=1:a=0,settb=${rd}/${rn},setpts=N[vout]`);
 
   // Audio: left to right, a 2-way concat for a cut, acrossfade for a transition.
   let a = 'a0';
-  if (hasAudio) {
+  if (clipAudio) {
     for (let i = 1; i < clips.length; i++) {
       const t = lay.trans[i];
       graph.push(t > 0
@@ -159,6 +187,39 @@ export function montageArgs(
         : `[${a}][a${i}]concat=n=2:v=0:a=1[aj${i}]`);
       a = `aj${i}`;
     }
+  }
+
+  // Overlays (e.g. a translated voice track) over the montage's own sound, which can be kept,
+  // turned down or muted. amix with duration=first keeps the result exactly as long as the video.
+  const origVolume = originalVolume(opts.originalAudio);
+  if (overlays.length) {
+    const seconds = (lay.total / fps).toFixed(6);
+    if (clipAudio) graph.push(`[${a}]volume=${origVolume}[base]`);
+    else graph.push(`anullsrc=r=${rate}:cl=${chLayout}:d=${seconds}[base]`);
+    const mix = ['[base]'];
+    for (const [k, o] of overlays.entries()) {
+      inputs.push('-vn', '-i', o.path);
+      const delay = Math.round((o.start / fps) * 1000);
+      graph.push(`[${clips.length + k}:a:0]aresample=${rate},aformat=sample_rates=${rate}:channel_layouts=${chLayout},`
+        + `adelay=delays=${delay}:all=1,volume=${o.volume}[o${k}]`);
+      mix.push(`[o${k}]`);
+    }
+    graph.push(`${mix.join('')}amix=inputs=${mix.length}:duration=first:dropout_transition=0:normalize=0[amix]`);
+    a = 'amix';
+  } else if (clipAudio && origVolume !== 1) {
+    graph.push(`[${a}]volume=${origVolume}[aquiet]`);
+    a = 'aquiet';
+  }
+
+  if (audioOnly) {
+    return [
+      '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', '-copyts',
+      ...inputs,
+      '-filter_complex', graph.join(';'),
+      '-map', `[${a}]`,
+      ...(audioOnly === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', '192k'] : ['-c:a', 'pcm_s16le']),
+      output,
+    ];
   }
 
   const fieldOrder = !progressive && target.interlace === 'tff' ? ['-field_order', 'tt']
@@ -184,6 +245,10 @@ export interface MontageOptions {
   crf?: number;
   /** Deinterlace everything (set when a reversed clip comes from an interlaced source). */
   progressive?: boolean;
+  overlays?: AudioOverlay[];
+  originalAudio?: OriginalAudio;
+  /** Write only the sound, to WAV or MP3 (for translation, dubbing...). */
+  audioOnly?: AudioExportFormat;
 }
 
 /**
@@ -199,6 +264,10 @@ export async function renderMontage(
   if (!validMontage(clips, lengths)) throw new Error('Монтаж пуст или выходит за пределы видео.');
   if (clips.length > MAX_CLIPS) throw new Error(`Слишком много клипов (${clips.length}), максимум ${MAX_CLIPS}.`);
   const total = montageFrames(clips, target.fps);
+  if (!validOverlays(opts.overlays ?? [], total)) throw new Error('Наложенный звук задан неверно.');
+  for (const o of opts.overlays ?? []) {
+    if (!existsSync(o.path)) throw new Error(`Нет файла звука: ${o.path}`);
+  }
   const backwards = clips.filter((c) => c.reversed).reduce((n, c) => n + c.end - c.start, 0);
   const work = backwards ? mkdtempSync(path.join(os.tmpdir(), 'enhancer-reverse-')) : null;
   const ext = path.extname(output);
@@ -236,7 +305,10 @@ export async function renderMontage(
     }
     await runOk(requireTool('ffmpeg'), montageArgs(target, plan, final, tmp, { ...opts, progressive }), {
       signal,
-      onStdout: frameCounter((n) => report(backwards + Math.min(n, total))),
+      // Sound only: ffmpeg reports time written instead of frames.
+      onStdout: opts.audioOnly
+        ? timeCounter((sec) => report(backwards + Math.min(Math.round(sec * target.fps), total)))
+        : frameCounter((n) => report(backwards + Math.min(n, total))),
     });
     renameSync(tmp, output);
   } finally {
