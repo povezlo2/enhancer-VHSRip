@@ -3,13 +3,14 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { Segment } from '../shared/segments';
 import type {
-  CacheInfo, JobProgress, MontageProgress, MontageRequest, PreviewRequest, PreviewResult, ProcessOptions, SceneRequest,
+  AudioExportFormat, CacheInfo, JobProgress, MontageProgress, MontageRequest, PreviewRequest, PreviewResult, ProcessOptions, SceneRequest,
   VideoInfo,
 } from '../shared/types';
 import { analyze } from './analyze';
 import { ChunkCache } from './cache';
 import { serveFile } from './media';
-import { montageOutput, renderMontage, thumbnailsFor } from './montage';
+import { AUDIO_EXT, probeAudio } from './audio';
+import { audioOutput, montageOutput, renderMontage, thumbnailsFor } from './montage';
 import { originalPreview, processClip, TMP_ROOT } from './pipeline';
 import { proxyFor } from './proxy';
 import { reversedProxyFor } from './reverse';
@@ -151,23 +152,45 @@ function registerIpc() {
     return thumbs;
   });
 
-  ipcMain.handle('montage:render', async (_e, req: MontageRequest) => {
+  /** Montage render, or (with `audio`) only its sound to WAV/MP3. */
+  const montageJob = async (req: MontageRequest, audio?: AudioExportFormat) => {
     montageController?.abort();
     const controller = new AbortController();
     montageController = controller;
     const target = await analyzeCached(req.owner);
     const sources = new Map<string, VideoInfo>();
     for (const p of new Set(req.clips.map((c) => c.source))) sources.set(p, await analyzeCached(p));
-    const output = montageOutput(req.owner, req.outDir, req.format);
+    const output = audio ? audioOutput(req.owner, req.outDir, audio) : montageOutput(req.owner, req.outDir, req.format);
     const send = (p: MontageProgress) => win?.webContents.send('montage:progress', p);
     try {
-      await renderMontage(target, sources, req.clips, output, { format: req.format, crf: req.crf }, controller.signal, send);
+      await renderMontage(target, sources, req.clips, output, {
+        format: req.format, crf: req.crf, overlays: req.overlays, originalAudio: req.originalAudio, audioOnly: audio,
+      }, controller.signal, send);
     } finally {
       if (montageController === controller) montageController = null;
     }
     allow(output);
     send({ percent: 100, output });
     return output;
+  };
+
+  ipcMain.handle('montage:render', (_e, req: MontageRequest) => montageJob(req));
+  ipcMain.handle('montage:extractAudio', (_e, req: MontageRequest, format: AudioExportFormat) =>
+    montageJob(req, format === 'mp3' ? 'mp3' : 'wav'));
+
+  ipcMain.handle('dialog:openAudio', async () => {
+    const res = await dialog.showOpenDialog(win!, {
+      title: 'Выберите звук',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Звук', extensions: AUDIO_EXT }, { name: 'Все файлы', extensions: ['*'] }],
+    });
+    return res.filePaths;
+  });
+
+  ipcMain.handle('audio:probe', async (_e, file: string) => {
+    const info = await probeAudio(file);
+    allow(file); // the player plays it in sync with the montage
+    return info;
   });
 
   ipcMain.handle('montage:cancel', () => {

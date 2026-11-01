@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type MontageClip, reverseMontage, setTransition } from '../shared/montage';
 import type { VideoInfo } from '../shared/types';
 import { analyze } from './analyze';
-import { fitSize, montageArgs, montageOutput, needsConversion, renderMontage, thumbnailsFor } from './montage';
+import { probeAudio } from './audio';
+import { audioOutput, fitSize, montageArgs, montageOutput, needsConversion, renderMontage, thumbnailsFor } from './montage';
 import { REVERSE_CHUNK, reverseChunks, reversedProxyFor } from './reverse';
 import { tools } from './tools';
 
@@ -155,6 +156,74 @@ describe.skipIf(!hasFfmpeg)('renderMontage', () => {
     expect(p.video.codec_name).toBe('h264');
     expect(frameHashes(file)).toHaveLength(a.frames);
     expect(await reversedProxyFor(a, path.join(dir, 'proxies'))).toBe(file); // cached
+  });
+
+  /** Peak level (dB) of `file`'s sound between two times. */
+  function peak(file: string, from: number, to: number): number {
+    const res = ffmpeg(['-v', 'info', '-i', file, '-vn', '-af', `atrim=start=${from}:end=${to},volumedetect`, '-f', 'null', '-']);
+    const m = /max_volume:\s*(-?[\d.]+|-inf) dB/.exec(res.stderr);
+    return m ? (m[1] === '-inf' ? -200 : Number(m[1])) : NaN;
+  }
+
+  describe('sound', () => {
+    let tone: string;
+    beforeAll(() => {
+      tone = path.join(dir, 'voice.wav'); // stands in for a translated voice track: 0.5 s at 880 Hz
+      const res = ffmpeg(['-f', 'lavfi', '-i', 'sine=f=880:d=0.5:r=44100', tone]);
+      expect(res.status, res.stderr).toBe(0);
+    });
+
+    it('extracts the montage sound to WAV or MP3, as long as the montage', async () => {
+      const clips = [clipA(5, 20, 'x'), clipA(40, 50, 'y')];
+      const wav = audioOutput(a.path, dir, 'wav');
+      expect(path.basename(wav)).toBe('a_audio.wav');
+      await renderMontage(a, new Map([[a.path, a]]), clips, wav, { format: 'lossless', audioOnly: 'wav' }, signal(), () => undefined);
+      let p = probe(wav);
+      expect(p.audio?.codec_name).toBe('pcm_s16le');
+      expect(p.video).toBeUndefined();
+      expect(Math.abs(p.duration - 25 / 25)).toBeLessThan(0.05);
+      const mp3 = audioOutput(a.path, dir, 'mp3');
+      await renderMontage(a, new Map([[a.path, a]]), clips, mp3, { format: 'lossless', audioOnly: 'mp3' }, signal(), () => undefined);
+      p = probe(mp3);
+      expect(p.audio?.codec_name).toBe('mp3');
+      expect(Math.abs(p.duration - 1)).toBeLessThan(0.1);
+    });
+
+    it('lays a voice track over the picture at its position, original muted', async () => {
+      const info = await probeAudio(tone);
+      expect(info.duration).toBeCloseTo(0.5, 2);
+      const out = path.join(dir, 'dubbed.mkv');
+      await renderMontage(a, new Map([[a.path, a]]), [clipA(0, 50, 'x')], out, {
+        format: 'lossless', originalAudio: 'mute',
+        overlays: [{ id: 'v', path: tone, name: 'voice.wav', start: 25, duration: info.duration, volume: 1 }],
+      }, signal(), () => undefined);
+      const p = probe(out);
+      expect(Math.abs(p.duration - 2)).toBeLessThan(0.05);
+      expect(frameHashes(out)).toEqual(sourceA.slice(0, 50)); // the picture is untouched
+      expect(peak(out, 0, 0.95)).toBeLessThan(-80); // original muted, voice not yet started
+      expect(peak(out, 1.05, 1.45)).toBeGreaterThan(-25); // voice from 1.0 s
+      expect(peak(out, 1.6, 2)).toBeLessThan(-80); // and over after 0.5 s
+    });
+
+    it('keeps the original under the overlay when asked, and adds sound to silent videos', async () => {
+      const voice = { id: 'v', path: tone, name: 'voice.wav', start: 0, duration: 0.5, volume: 1 };
+      const keep = path.join(dir, 'kept.wav');
+      await renderMontage(a, new Map([[a.path, a]]), [clipA(0, 50, 'x')], keep,
+        { format: 'lossless', audioOnly: 'wav', originalAudio: 'keep', overlays: [voice] }, signal(), () => undefined);
+      expect(peak(keep, 1, 2)).toBeGreaterThan(-25); // the original sine of A is still there after the voice
+      // B has no sound of its own: the voice still gets a track as long as the video.
+      const silent = path.join(dir, 'silent-dub.mp4');
+      await renderMontage(b, new Map([[b.path, b]]), [{ id: 'y', source: b.path, fps: b.fps, start: 0, end: 60 }], silent,
+        { format: 'mp4', overlays: [voice] }, signal(), () => undefined);
+      const p = probe(silent);
+      expect(p.audio?.codec_name).toBe('aac');
+      expect(Math.abs(p.duration - 2)).toBeLessThan(0.1);
+    });
+
+    it('refuses extracting from a montage without sound', async () => {
+      await expect(renderMontage(b, new Map([[b.path, b]]), [{ id: 'y', source: b.path, fps: b.fps, start: 0, end: 30 }],
+        path.join(dir, 'none.wav'), { format: 'lossless', audioOnly: 'wav' }, signal(), () => undefined)).rejects.toThrow(/нет звука/);
+    });
   });
 
   it('refuses an empty or out-of-range montage', async () => {
